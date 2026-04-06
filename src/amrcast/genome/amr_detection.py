@@ -67,12 +67,18 @@ def _parse_card_header(name: str) -> tuple[str, str]:
 def detect_amr_genes_phmmer(
     genes: list[CalledGene],
     card_dir: Path,
-    evalue_threshold: float = 1e-10,
+    evalue_threshold: float = 1e-20,
+    min_coverage: float = 0.8,
 ) -> list[AMRHit]:
     """Detect AMR genes using phmmer (sequence-vs-sequence) against CARD proteins.
 
     This is the default mode for the vertical slice since CARD distributes
     protein FASTA files rather than pre-built HMMs.
+
+    Uses strict thresholds to reduce cross-family noise. For example, an E. coli
+    acrB efflux pump would otherwise match MexB, smeE, adeJ etc. from other species
+    because RND efflux pumps share structural homology. We only want the best
+    CARD match per called gene.
     """
     if not genes:
         return []
@@ -119,6 +125,10 @@ def detect_amr_genes_phmmer(
                     coverage = min(ali_span / query_len, 1.0)
                     identity = min(hit.score / (query_len * 3.0), 1.0)
 
+            # Skip low-coverage hits (partial matches / domain-only matches)
+            if coverage < min_coverage:
+                continue
+
             hits.append(
                 AMRHit(
                     gene_family=gene_family,
@@ -133,15 +143,19 @@ def detect_amr_genes_phmmer(
                 )
             )
 
-    # Deduplicate: keep best hit per gene per gene family
-    best_hits: dict[tuple[str, str], AMRHit] = {}
+    # Deduplicate: keep SINGLE best CARD hit per called gene.
+    # This prevents one E. coli protein from being counted as 10 different
+    # AMR gene families just because efflux pumps share homology.
+    best_per_gene: dict[str, AMRHit] = {}
     for hit in hits:
-        key = (hit.gene_id, hit.gene_family)
-        if key not in best_hits or hit.score > best_hits[key].score:
-            best_hits[key] = hit
+        if hit.gene_id not in best_per_gene or hit.score > best_per_gene[hit.gene_id].score:
+            best_per_gene[hit.gene_id] = hit
 
-    logger.info(f"Found {len(best_hits)} AMR hits across {len(genes)} genes")
-    return list(best_hits.values())
+    logger.info(
+        f"Found {len(best_per_gene)} AMR hits across {len(genes)} genes "
+        f"(filtered from {len(hits)} raw hits)"
+    )
+    return list(best_per_gene.values())
 
 
 def detect_amr_genes_hmmsearch(
@@ -225,7 +239,8 @@ def detect_amr_genes_hmmsearch(
 def detect_amr_genes(
     genes: list[CalledGene],
     card_dir: Path,
-    evalue_threshold: float = 1e-10,
+    evalue_threshold: float = 1e-20,
+    min_coverage: float = 0.8,
 ) -> list[AMRHit]:
     """Detect AMR genes — auto-selects phmmer or hmmsearch based on available files."""
     hmm_files = list(card_dir.glob("*.hmm"))
@@ -236,7 +251,7 @@ def detect_amr_genes(
         return detect_amr_genes_hmmsearch(genes, card_dir, evalue_threshold)
     elif fasta_files:
         logger.info("Using phmmer mode (CARD protein FASTA found)")
-        return detect_amr_genes_phmmer(genes, card_dir, evalue_threshold)
+        return detect_amr_genes_phmmer(genes, card_dir, evalue_threshold, min_coverage)
     else:
         raise FileNotFoundError(
             f"No .hmm or .fasta files found in {card_dir}. "
