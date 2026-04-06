@@ -1,38 +1,53 @@
-"""Data models for genome processing outputs."""
+"""Data models for AMRFinderPlus output."""
 
 from pydantic import BaseModel
 
 
-class CalledGene(BaseModel):
-    """A gene predicted by Pyrodigal."""
+class AMRFinderHit(BaseModel):
+    """A single row from AMRFinderPlus output."""
 
-    gene_id: str
     contig_id: str
     start: int
-    end: int
-    strand: int  # 1 or -1
-    protein_sequence: str
+    stop: int
+    strand: str
+    element_symbol: str
+    element_name: str
+    scope: str  # "core" or "plus"
+    type: str  # "AMR", "STRESS", "VIRULENCE"
+    subtype: str
+    drug_class: str
+    drug_subclass: str
+    method: str  # "EXACTX", "BLASTX", "PARTIALX", "HMM", "POINTX" etc.
+    target_length: int
+    ref_length: int
+    coverage: float  # percent
+    identity: float  # percent
+    closest_ref: str
+    closest_ref_name: str
 
 
-class AMRHit(BaseModel):
-    """An AMR gene detected by HMM search against CARD."""
-
-    gene_family: str
-    gene_id: str
-    query_name: str
-    evalue: float
-    score: float
-    identity: float  # 0-1 scale
-    coverage: float  # 0-1 scale
-    protein_sequence: str
-    description: str = ""
-
-
-class GenomeAnnotation(BaseModel):
-    """Complete annotation output for a genome."""
+class GenomeAMRProfile(BaseModel):
+    """Complete AMRFinderPlus results for a genome."""
 
     sample_id: str
-    num_contigs: int
-    total_length: int
-    genes: list[CalledGene]
-    amr_hits: list[AMRHit]
+    hits: list[AMRFinderHit]
+
+    @property
+    def amr_hits(self) -> list[AMRFinderHit]:
+        """Only AMR-type hits (not virulence/stress)."""
+        return [h for h in self.hits if h.type == "AMR"]
+
+    @property
+    def point_mutations(self) -> list[AMRFinderHit]:
+        """Hits detected via point mutation method."""
+        return [h for h in self.hits if h.method in ("POINTX", "POINTN")]
+
+    @property
+    def gene_symbols(self) -> list[str]:
+        """Unique AMR gene symbols detected."""
+        return sorted({h.element_symbol for h in self.amr_hits})
+
+    @property
+    def drug_classes(self) -> list[str]:
+        """Unique drug classes with detected resistance."""
+        return sorted({h.drug_class for h in self.amr_hits if h.drug_class != "NA"})

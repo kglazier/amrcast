@@ -18,6 +18,7 @@ def train(
     ),
     data_dir: Path = typer.Option(None, help="Data directory."),
     model_dir: Path = typer.Option(None, help="Model output directory."),
+    organism: str = typer.Option("Escherichia", help="Organism for AMRFinderPlus."),
 ) -> None:
     """Train XGBoost MIC prediction models on downloaded data."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -31,18 +32,17 @@ def train(
     typer.echo("Training MIC prediction models...")
     typer.echo(f"  Data: {data_dir}")
     typer.echo(f"  Models: {model_dir}")
+    typer.echo(f"  Organism: {organism}")
     if ab_list:
         typer.echo(f"  Antibiotics: {ab_list}")
 
     from amrcast.ml.training import run_training_pipeline
 
-    card_dir = settings.card_dir / "hmms"
-
     metrics = run_training_pipeline(
         data_dir=data_dir,
-        card_dir=card_dir,
         model_dir=model_dir,
         antibiotics=ab_list,
+        organism=organism,
     )
 
     typer.echo("\n=== Training Results ===")

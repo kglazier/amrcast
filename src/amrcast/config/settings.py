@@ -14,12 +14,16 @@ class Settings(BaseSettings):
     # Paths
     data_dir: Path = Field(default=Path("data"), description="Root data directory")
     model_dir: Path = Field(default=Path("data/models"), description="Trained model artifacts")
-    card_dir: Path = Field(default=Path("data/card"), description="CARD database files")
 
-    # Genome processing
-    min_contig_length: int = Field(default=500, description="Minimum contig length for gene calling")
+    # AMRFinderPlus
+    amrfinder_path: str = Field(default="amrfinder", description="Path to amrfinder binary")
+    amrfinder_organism: str = Field(
+        default="Escherichia",
+        description="Organism for AMRFinderPlus (enables point mutation detection)",
+    )
+    amrfinder_threads: int = Field(default=4, description="Threads for AMRFinderPlus")
 
-    # ESM-2
+    # ESM-2 (future)
     esm_model_name: str = Field(
         default="esm2_t33_650M_UR50D",
         description="ESM-2 model name for protein embeddings",
@@ -39,10 +43,6 @@ class Settings(BaseSettings):
     @property
     def processed_dir(self) -> Path:
         return self.data_dir / "processed"
-
-    @property
-    def features_dir(self) -> Path:
-        return self.data_dir / "features"
 
 
 def get_settings() -> Settings:

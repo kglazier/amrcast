@@ -21,31 +21,34 @@ def predict(
     model_dir: Path = typer.Option(None, help="Model directory."),
     output: Path = typer.Option(None, "-o", help="Output JSON file. Default: stdout."),
     explain: bool = typer.Option(False, "--explain", help="Include SHAP explanations."),
+    organism: str = typer.Option("Escherichia", help="Organism for AMRFinderPlus."),
 ) -> None:
     """Predict MIC values for a genome assembly."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
     settings = get_settings()
     model_dir = model_dir or settings.model_dir
-    card_dir = settings.card_dir / "hmms"
 
     if not input_file.exists():
         typer.echo(f"Error: Input file not found: {input_file}", err=True)
         raise typer.Exit(1)
 
     # Load model metadata
-    gene_families_path = model_dir / "gene_families.json"
+    gene_symbols_path = model_dir / "gene_symbols.json"
+    drug_classes_path = model_dir / "drug_classes.json"
     feature_columns_path = model_dir / "feature_columns.json"
 
-    if not gene_families_path.exists():
+    if not gene_symbols_path.exists():
         typer.echo(
             f"Error: No trained models found in {model_dir}. Run 'amrcast train run' first.",
             err=True,
         )
         raise typer.Exit(1)
 
-    with open(gene_families_path) as f:
-        gene_families = json.load(f)
+    with open(gene_symbols_path) as f:
+        gene_symbols = json.load(f)
+    with open(drug_classes_path) as f:
+        drug_classes = json.load(f)
     with open(feature_columns_path) as f:
         feature_columns = json.load(f)
 
@@ -72,21 +75,23 @@ def predict(
 
     typer.echo(f"Processing {input_file.name}...", err=True)
 
-    # Step 1: Process genome
-    from amrcast.genome.pipeline import process_genome
+    # Step 1: Run AMRFinderPlus
+    from amrcast.genome.amrfinder import run_amrfinder
 
-    annotation = process_genome(input_file, card_dir=card_dir)
+    profile = run_amrfinder(input_file, organism=organism)
     typer.echo(
-        f"  {annotation.num_contigs} contigs, "
-        f"{len(annotation.genes)} genes, "
-        f"{len(annotation.amr_hits)} AMR hits",
+        f"  {len(profile.amr_hits)} AMR genes, "
+        f"{len(profile.point_mutations)} point mutations, "
+        f"{len(profile.drug_classes)} drug classes",
         err=True,
     )
 
     # Step 2: Extract features
-    from amrcast.features.gene_features import build_gene_feature_matrix
+    from amrcast.features.gene_features import build_feature_matrix
 
-    feature_df = build_gene_feature_matrix([annotation], gene_families=gene_families)
+    feature_df = build_feature_matrix(
+        [profile], gene_symbols=gene_symbols, drug_classes=drug_classes
+    )
     X = feature_df.values
 
     # Step 3: Predict
@@ -128,11 +133,11 @@ def predict(
 
     result = {
         "sample": input_file.name,
-        "genome_stats": {
-            "contigs": annotation.num_contigs,
-            "total_length": annotation.total_length,
-            "genes_called": len(annotation.genes),
-            "amr_genes_detected": len(annotation.amr_hits),
+        "amrfinder_summary": {
+            "amr_genes": len(profile.amr_hits),
+            "point_mutations": len(profile.point_mutations),
+            "drug_classes": profile.drug_classes,
+            "gene_symbols": profile.gene_symbols,
         },
         "predictions": predictions,
     }

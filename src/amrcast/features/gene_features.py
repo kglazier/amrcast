@@ -1,53 +1,83 @@
-"""Gene presence/absence and identity score features from AMR detection."""
+"""Feature extraction from AMRFinderPlus output.
+
+Builds feature matrices from gene presence/absence, identity scores,
+point mutations, and drug class indicators.
+"""
 
 import numpy as np
 import pandas as pd
 
-from amrcast.genome.models import AMRHit, GenomeAnnotation
+from amrcast.genome.models import GenomeAMRProfile
 
 
-def build_gene_feature_matrix(
-    annotations: list[GenomeAnnotation],
-    gene_families: list[str] | None = None,
+def build_feature_matrix(
+    profiles: list[GenomeAMRProfile],
+    gene_symbols: list[str] | None = None,
+    drug_classes: list[str] | None = None,
 ) -> pd.DataFrame:
-    """Build a gene presence/absence + identity score matrix.
+    """Build a feature matrix from AMRFinderPlus profiles.
 
-    Each row is a genome. Each gene family gets two columns:
-    - {family}_present: 1/0 binary presence
-    - {family}_score: best hit score (0 if absent)
+    Features per genome:
+    - {gene}_present: 1/0 for each known AMR gene symbol
+    - {gene}_identity: best identity score (0-100) for each gene
+    - {drug_class}_class: 1/0 for each drug class with detected resistance
+    - n_amr_genes: total count of AMR genes detected
+    - n_point_mutations: count of point mutations detected
+    - n_drug_classes: count of distinct drug classes
 
     Args:
-        annotations: List of genome annotations.
-        gene_families: Fixed list of gene families to use as columns.
-            If None, inferred from all annotations.
+        profiles: List of GenomeAMRProfile objects.
+        gene_symbols: Fixed list of gene symbols for columns. If None, inferred.
+        drug_classes: Fixed list of drug classes. If None, inferred.
 
     Returns:
-        DataFrame with sample_id as index, gene feature columns.
+        DataFrame with sample_id as index.
     """
-    # Collect all gene families if not provided
-    if gene_families is None:
-        all_families: set[str] = set()
-        for ann in annotations:
-            for hit in ann.amr_hits:
-                all_families.add(hit.gene_family)
-        gene_families = sorted(all_families)
+    # Collect all gene symbols and drug classes if not provided
+    if gene_symbols is None:
+        all_symbols: set[str] = set()
+        for p in profiles:
+            for h in p.amr_hits:
+                all_symbols.add(h.element_symbol)
+        gene_symbols = sorted(all_symbols)
+
+    if drug_classes is None:
+        all_classes: set[str] = set()
+        for p in profiles:
+            for h in p.amr_hits:
+                if h.drug_class != "NA":
+                    all_classes.add(h.drug_class)
+        drug_classes = sorted(all_classes)
 
     rows = []
-    for ann in annotations:
-        # Index hits by gene family (keep best score per family)
-        best_by_family: dict[str, AMRHit] = {}
-        for hit in ann.amr_hits:
-            if hit.gene_family not in best_by_family or hit.score > best_by_family[hit.gene_family].score:
-                best_by_family[hit.gene_family] = hit
+    for profile in profiles:
+        row: dict[str, float] = {"sample_id": profile.sample_id}
 
-        row: dict[str, float] = {"sample_id": ann.sample_id}
-        for family in gene_families:
-            if family in best_by_family:
-                row[f"{family}_present"] = 1.0
-                row[f"{family}_score"] = best_by_family[family].score
+        # Index AMR hits by gene symbol (keep best identity per symbol)
+        best_by_symbol: dict[str, float] = {}
+        for h in profile.amr_hits:
+            sym = h.element_symbol
+            if sym not in best_by_symbol or h.identity > best_by_symbol[sym]:
+                best_by_symbol[sym] = h.identity
+
+        # Gene presence/absence + identity
+        for sym in gene_symbols:
+            if sym in best_by_symbol:
+                row[f"{sym}_present"] = 1.0
+                row[f"{sym}_identity"] = best_by_symbol[sym]
             else:
-                row[f"{family}_present"] = 0.0
-                row[f"{family}_score"] = 0.0
+                row[f"{sym}_present"] = 0.0
+                row[f"{sym}_identity"] = 0.0
+
+        # Drug class indicators
+        detected_classes = {h.drug_class for h in profile.amr_hits if h.drug_class != "NA"}
+        for dc in drug_classes:
+            row[f"{dc}_class"] = 1.0 if dc in detected_classes else 0.0
+
+        # Summary features
+        row["n_amr_genes"] = float(len(profile.amr_hits))
+        row["n_point_mutations"] = float(len(profile.point_mutations))
+        row["n_drug_classes"] = float(len(detected_classes))
 
         rows.append(row)
 
@@ -56,12 +86,10 @@ def build_gene_feature_matrix(
 
 
 def extract_features_single(
-    annotation: GenomeAnnotation,
-    gene_families: list[str],
+    profile: GenomeAMRProfile,
+    gene_symbols: list[str],
+    drug_classes: list[str],
 ) -> np.ndarray:
-    """Extract feature vector for a single genome.
-
-    Returns a flat numpy array: [family1_present, family1_score, family2_present, ...].
-    """
-    df = build_gene_feature_matrix([annotation], gene_families=gene_families)
+    """Extract feature vector for a single genome."""
+    df = build_feature_matrix([profile], gene_symbols=gene_symbols, drug_classes=drug_classes)
     return df.values[0]
