@@ -91,6 +91,102 @@ def run_amrfinder(
     return parse_amrfinder_output(result.stdout, sample_id=fasta_path.stem)
 
 
+def _to_wsl_path(win_path: Path) -> str:
+    """Convert a Windows path to WSL /mnt/c/... path."""
+    p = str(win_path).replace("\\", "/")
+    if len(p) >= 2 and p[1] == ":":
+        drive = p[0].lower()
+        p = f"/mnt/{drive}{p[2:]}"
+    return p
+
+
+def run_amrfinder_batch(
+    fasta_paths: list[Path],
+    output_dir: Path,
+    organism: str = "Escherichia",
+    threads: int = 4,
+) -> dict[str, GenomeAMRProfile]:
+    """Run AMRFinderPlus on multiple genomes in a single WSL session.
+
+    This avoids the ~60 second WSL startup overhead per genome by running
+    a single bash script that processes all files.
+
+    Args:
+        fasta_paths: List of FASTA file paths.
+        output_dir: Directory to write per-genome TSV results.
+        organism: Organism for AMRFinderPlus.
+        threads: Threads per AMRFinderPlus call.
+
+    Returns:
+        Dict of sample_id -> GenomeAMRProfile.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    is_windows = platform.system() == "Windows"
+
+    # Build a bash script that processes all genomes
+    amrfinder_bin = "$HOME/miniconda3/bin/amrfinder" if is_windows else "amrfinder"
+    lines = [
+        "#!/bin/bash",
+        "set -e",
+    ]
+    if is_windows:
+        lines.append("export PATH=$HOME/miniconda3/bin:$PATH")
+
+    for fasta_path in fasta_paths:
+        sample_id = fasta_path.stem
+        if is_windows:
+            fasta_wsl = _to_wsl_path(fasta_path)
+            out_wsl = _to_wsl_path(output_dir / f"{sample_id}.tsv")
+        else:
+            fasta_wsl = str(fasta_path)
+            out_wsl = str(output_dir / f"{sample_id}.tsv")
+
+        lines.append(
+            f'{amrfinder_bin} --nucleotide "{fasta_wsl}" '
+            f'--organism {organism} --plus --threads {threads} '
+            f'> "{out_wsl}" 2>/dev/null && '
+            f'echo "DONE:{sample_id}" || echo "FAIL:{sample_id}"'
+        )
+
+    script = "\n".join(lines)
+
+    logger.info(f"Running AMRFinderPlus batch on {len(fasta_paths)} genomes...")
+
+    if is_windows:
+        cmd = ["wsl", "--exec", "bash", "--noprofile", "--norc"]
+    else:
+        cmd = ["bash"]
+
+    result = subprocess.run(
+        cmd,
+        input=script,
+        capture_output=True,
+        text=True,
+        timeout=len(fasta_paths) * 30 + 60,  # ~30 sec per genome + buffer
+    )
+
+    # Parse results
+    profiles = {}
+    done_count = 0
+    fail_count = 0
+
+    for line in result.stdout.strip().split("\n"):
+        line = line.strip()
+        if line.startswith("DONE:"):
+            sample_id = line[5:]
+            done_count += 1
+            tsv_path = output_dir / f"{sample_id}.tsv"
+            if tsv_path.exists():
+                profiles[sample_id] = parse_amrfinder_file(tsv_path, sample_id=sample_id)
+        elif line.startswith("FAIL:"):
+            sample_id = line[5:]
+            fail_count += 1
+            logger.warning(f"  AMRFinderPlus failed for {sample_id}")
+
+    logger.info(f"Batch complete: {done_count} succeeded, {fail_count} failed")
+    return profiles
+
+
 def parse_amrfinder_output(tsv_text: str, sample_id: str = "unknown") -> GenomeAMRProfile:
     """Parse AMRFinderPlus TSV output into structured data.
 

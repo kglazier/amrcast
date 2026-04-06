@@ -19,6 +19,8 @@ def train(
     data_dir: Path = typer.Option(None, help="Data directory."),
     model_dir: Path = typer.Option(None, help="Model output directory."),
     organism: str = typer.Option("Escherichia", help="Organism for AMRFinderPlus."),
+    esm: bool = typer.Option(False, "--esm", help="Include ESM-2 protein embeddings (requires GPU)."),
+    esm_model: str = typer.Option("esm2_t33_650M_UR50D", help="ESM-2 model name."),
 ) -> None:
     """Train XGBoost MIC prediction models on downloaded data."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -33,6 +35,7 @@ def train(
     typer.echo(f"  Data: {data_dir}")
     typer.echo(f"  Models: {model_dir}")
     typer.echo(f"  Organism: {organism}")
+    typer.echo(f"  ESM-2: {'enabled (' + esm_model + ')' if esm else 'disabled'}")
     if ab_list:
         typer.echo(f"  Antibiotics: {ab_list}")
 
@@ -43,6 +46,8 @@ def train(
         model_dir=model_dir,
         antibiotics=ab_list,
         organism=organism,
+        use_esm=esm,
+        esm_model_name=esm_model,
     )
 
     typer.echo("\n=== Training Results ===")

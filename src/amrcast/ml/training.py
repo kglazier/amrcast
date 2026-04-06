@@ -9,7 +9,7 @@ import pandas as pd
 
 from amrcast.data.harmonize import harmonize_mic_data
 from amrcast.features.gene_features import build_feature_matrix
-from amrcast.genome.amrfinder import run_amrfinder, parse_amrfinder_file
+from amrcast.genome.amrfinder import run_amrfinder, run_amrfinder_batch, parse_amrfinder_file
 from amrcast.genome.models import GenomeAMRProfile
 from amrcast.ml.xgboost_model import MICPredictor
 
@@ -22,6 +22,8 @@ def run_training_pipeline(
     antibiotics: list[str] | None = None,
     organism: str = "Escherichia",
     use_cached_amrfinder: bool = True,
+    use_esm: bool = False,
+    esm_model_name: str = "esm2_t33_650M_UR50D",
 ) -> dict:
     """Run the full training pipeline.
 
@@ -63,34 +65,44 @@ def run_training_pipeline(
     amrfinder_dir.mkdir(parents=True, exist_ok=True)
 
     genome_ids = meta["genome_id"].unique()
-    logger.info(f"Processing {len(genome_ids)} genomes with AMRFinderPlus...")
 
+    # Load cached profiles and identify which genomes need processing
     profiles: dict[str, GenomeAMRProfile] = {}
+    to_process: list[Path] = []
 
-    for i, gid in enumerate(genome_ids):
+    for gid in genome_ids:
         gid_str = str(gid)
         fasta_path = genomes_dir / f"{gid_str}.fasta"
-        cache_path = amrfinder_dir / f"{gid_str}.tsv"
+        cache_path = amrfinder_dir / f"{gid_str}.json"
 
         if not fasta_path.exists():
             continue
 
-        try:
-            # Use cached results if available
-            if use_cached_amrfinder and cache_path.exists():
-                profile = _load_cached_profile(cache_path)
-            else:
-                profile = run_amrfinder(fasta_path, organism=organism)
-                _cache_profile(profile, cache_path)
+        if use_cached_amrfinder and cache_path.exists():
+            try:
+                profiles[gid_str] = _load_cached_profile(cache_path)
+            except Exception:
+                to_process.append(fasta_path)
+        else:
+            to_process.append(fasta_path)
 
-            profiles[gid_str] = profile
+    logger.info(
+        f"Genomes: {len(profiles)} cached, {len(to_process)} to process with AMRFinderPlus"
+    )
 
-            if (i + 1) % 10 == 0:
-                logger.info(f"  Processed {i + 1}/{len(genome_ids)} genomes")
-        except Exception as e:
-            logger.warning(f"  Failed to process {gid_str}: {e}")
+    # Batch process uncached genomes in a single WSL session
+    if to_process:
+        tsv_dir = amrfinder_dir / "tsv"
+        batch_profiles = run_amrfinder_batch(
+            to_process, output_dir=tsv_dir, organism=organism
+        )
+        for sample_id, profile in batch_profiles.items():
+            profiles[sample_id] = profile
+            # Cache for next time
+            cache_path = amrfinder_dir / f"{sample_id}.json"
+            _cache_profile(profile, cache_path)
 
-    logger.info(f"Successfully processed {len(profiles)}/{len(genome_ids)} genomes")
+    logger.info(f"Successfully processed {len(profiles)} genomes total")
 
     if not profiles:
         raise ValueError("No genomes were successfully processed")
@@ -98,7 +110,28 @@ def run_training_pipeline(
     # Step 3: Build feature matrix
     logger.info("Building feature matrix...")
     profile_list = list(profiles.values())
-    feature_df = build_feature_matrix(profile_list)
+
+    if use_esm:
+        # Extract protein sequences from genomes for ESM-2 embedding
+        from amrcast.genome.protein_extractor import extract_proteins_from_genome
+        from amrcast.features.aggregator import build_combined_features_with_sequences
+
+        logger.info("Extracting protein sequences for ESM-2 embeddings...")
+        protein_sequences = {}
+        for gid_str, profile in profiles.items():
+            fasta_path = genomes_dir / f"{gid_str}.fasta"
+            if fasta_path.exists():
+                protein_sequences[gid_str] = extract_proteins_from_genome(profile, fasta_path)
+
+        esm_cache = data_dir / "esm_cache"
+        feature_df = build_combined_features_with_sequences(
+            profile_list,
+            protein_sequences=protein_sequences,
+            esm_model_name=esm_model_name,
+            esm_cache_dir=esm_cache,
+        )
+    else:
+        feature_df = build_feature_matrix(profile_list)
 
     if feature_df.shape[1] == 0:
         raise ValueError("No features extracted. Check AMRFinderPlus output.")

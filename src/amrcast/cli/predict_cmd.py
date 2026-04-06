@@ -22,6 +22,7 @@ def predict(
     output: Path = typer.Option(None, "-o", help="Output JSON file. Default: stdout."),
     explain: bool = typer.Option(False, "--explain", help="Include SHAP explanations."),
     organism: str = typer.Option("Escherichia", help="Organism for AMRFinderPlus."),
+    esm: bool = typer.Option(False, "--esm", help="Include ESM-2 protein embeddings."),
 ) -> None:
     """Predict MIC values for a genome assembly."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -87,11 +88,24 @@ def predict(
     )
 
     # Step 2: Extract features
-    from amrcast.features.gene_features import build_feature_matrix
+    if esm:
+        from amrcast.genome.protein_extractor import extract_proteins_from_genome
+        from amrcast.features.aggregator import build_combined_features_with_sequences
 
-    feature_df = build_feature_matrix(
-        [profile], gene_symbols=gene_symbols, drug_classes=drug_classes
-    )
+        protein_seqs = extract_proteins_from_genome(profile, input_file)
+        feature_df = build_combined_features_with_sequences(
+            [profile],
+            protein_sequences={profile.sample_id: protein_seqs},
+            gene_symbols=gene_symbols,
+            drug_classes=drug_classes,
+            esm_cache_dir=model_dir.parent / "esm_cache",
+        )
+    else:
+        from amrcast.features.gene_features import build_feature_matrix
+
+        feature_df = build_feature_matrix(
+            [profile], gene_symbols=gene_symbols, drug_classes=drug_classes
+        )
     X = feature_df.values
 
     # Step 3: Predict
