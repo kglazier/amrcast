@@ -1,11 +1,9 @@
 # Data and models (large files)
-data/raw/
-data/processed/
-data/features/
-data/models/
-data/card/
+data/
 *.h5
 *.hdf5
+*.fasta
+*.stackdump
 
 # Python
 __pycache__/
