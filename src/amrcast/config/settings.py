@@ -13,7 +13,7 @@ class Settings(BaseSettings):
 
     # Paths
     data_dir: Path = Field(default=Path("data"), description="Root data directory")
-    model_dir: Path = Field(default=Path("data/models"), description="Trained model artifacts")
+    model_dir: Path = Field(default=Path("data/narms/models"), description="Trained model artifacts")
 
     # AMRFinderPlus
     amrfinder_path: str = Field(default="amrfinder", description="Path to amrfinder binary")

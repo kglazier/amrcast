@@ -4,6 +4,7 @@ import json
 import logging
 from pathlib import Path
 
+import numpy as np
 import typer
 
 from amrcast.config.settings import get_settings
@@ -22,7 +23,6 @@ def predict(
     output: Path = typer.Option(None, "-o", help="Output JSON file. Default: stdout."),
     explain: bool = typer.Option(False, "--explain", help="Include SHAP explanations."),
     organism: str = typer.Option("Escherichia", help="Organism for AMRFinderPlus."),
-    esm: bool = typer.Option(False, "--esm", help="Include ESM-2 protein embeddings."),
 ) -> None:
     """Predict MIC values for a genome assembly."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -34,22 +34,16 @@ def predict(
         typer.echo(f"Error: Input file not found: {input_file}", err=True)
         raise typer.Exit(1)
 
-    # Load model metadata
-    gene_symbols_path = model_dir / "gene_symbols.json"
-    drug_classes_path = model_dir / "drug_classes.json"
+    # Load feature columns
     feature_columns_path = model_dir / "feature_columns.json"
-
-    if not gene_symbols_path.exists():
+    if not feature_columns_path.exists():
         typer.echo(
-            f"Error: No trained models found in {model_dir}. Run 'amrcast train run' first.",
+            f"Error: No trained models found in {model_dir}. "
+            f"Run training first or set --model-dir.",
             err=True,
         )
         raise typer.Exit(1)
 
-    with open(gene_symbols_path) as f:
-        gene_symbols = json.load(f)
-    with open(drug_classes_path) as f:
-        drug_classes = json.load(f)
     with open(feature_columns_path) as f:
         feature_columns = json.load(f)
 
@@ -68,45 +62,35 @@ def predict(
             typer.echo(f"Warning: No models for: {missing}", err=True)
         target_abs = [a for a in target_abs if a in available_abs]
     else:
-        target_abs = available_abs
+        target_abs = sorted(available_abs)
 
     if not target_abs:
         typer.echo("Error: No models available for requested antibiotics.", err=True)
         raise typer.Exit(1)
 
     typer.echo(f"Processing {input_file.name}...", err=True)
+    typer.echo(f"  Models: {len(target_abs)} antibiotics from {model_dir}", err=True)
 
     # Step 1: Run AMRFinderPlus
     from amrcast.genome.amrfinder import run_amrfinder
 
     profile = run_amrfinder(input_file, organism=organism)
     typer.echo(
-        f"  {len(profile.amr_hits)} AMR genes, "
+        f"  AMRFinderPlus: {len(profile.amr_hits)} AMR genes, "
         f"{len(profile.point_mutations)} point mutations, "
         f"{len(profile.drug_classes)} drug classes",
         err=True,
     )
 
-    # Step 2: Extract features
-    if esm:
-        from amrcast.genome.protein_extractor import extract_proteins_from_genome
-        from amrcast.features.aggregator import build_combined_features_with_sequences
+    # Step 2: Build features matching the trained model's expected columns
+    from amrcast.data.narms_features import build_features_from_amrfinder
 
-        protein_seqs = extract_proteins_from_genome(profile, input_file)
-        feature_df = build_combined_features_with_sequences(
-            [profile],
-            protein_sequences={profile.sample_id: protein_seqs},
-            gene_symbols=gene_symbols,
-            drug_classes=drug_classes,
-            esm_cache_dir=model_dir.parent / "esm_cache",
-        )
-    else:
-        from amrcast.features.gene_features import build_feature_matrix
-
-        feature_df = build_feature_matrix(
-            [profile], gene_symbols=gene_symbols, drug_classes=drug_classes
-        )
-    X = feature_df.values
+    all_gene_symbols = [h.element_symbol for h in profile.hits]
+    hit_methods = {h.element_symbol: h.method for h in profile.hits}
+    feature_vec = build_features_from_amrfinder(
+        all_gene_symbols, feature_columns, hit_methods=hit_methods
+    )
+    X = feature_vec.reshape(1, -1)
 
     # Step 3: Predict
     from amrcast.ml.xgboost_model import MICPredictor

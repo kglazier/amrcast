@@ -158,3 +158,57 @@ def build_narms_training_data(
 
     logger.info(f"Feature matrix: {feature_df.shape}")
     return feature_df, target_df
+
+
+def build_features_from_amrfinder(
+    gene_symbols_detected: list[str],
+    feature_columns: list[str],
+    hit_methods: dict[str, str] | None = None,
+) -> np.ndarray:
+    """Build a NARMS-compatible feature vector from AMRFinderPlus output.
+
+    This is used at prediction time: we run AMRFinderPlus on a new genome
+    and need to produce features matching what the NARMS models expect.
+
+    NCBI's genotype strings use "=POINT" suffix for point mutations
+    (e.g., "gyrA_S83L=POINT") while AMRFinderPlus outputs just "gyrA_S83L"
+    with method "POINTX"/"POINTN". We normalize by adding the suffix.
+
+    Args:
+        gene_symbols_detected: Gene symbols from AMRFinderPlus.
+        feature_columns: The saved feature column names from training.
+        hit_methods: Optional dict of symbol -> AMRFinderPlus method
+            (e.g., {"gyrA_S83L": "POINTX"}). Used to add "=POINT" suffix.
+
+    Returns:
+        1D numpy array matching feature_columns order.
+    """
+    # Normalize gene symbols to match NCBI format
+    normalized = set()
+    for sym in gene_symbols_detected:
+        method = (hit_methods or {}).get(sym, "")
+        if method in ("POINTX", "POINTN"):
+            normalized.add(f"{sym}=POINT")
+        else:
+            normalized.add(sym)
+        # Also add the raw symbol in case the model uses it
+        normalized.add(sym)
+
+    point_mutation_pattern = re.compile(r"_[A-Z]\d+[A-Z]")
+
+    features = np.zeros(len(feature_columns))
+    for i, col in enumerate(feature_columns):
+        if col == "n_amr_genes":
+            features[i] = float(len(gene_symbols_detected))
+        elif col == "n_point_mutations":
+            n_pts = sum(
+                1 for g in gene_symbols_detected
+                if (hit_methods or {}).get(g, "") in ("POINTX", "POINTN")
+                or point_mutation_pattern.search(g)
+            )
+            features[i] = float(n_pts)
+        elif col.endswith("_present"):
+            gene = col[: -len("_present")]
+            features[i] = 1.0 if gene in normalized else 0.0
+
+    return features
