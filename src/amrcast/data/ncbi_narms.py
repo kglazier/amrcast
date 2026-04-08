@@ -24,12 +24,13 @@ logger = logging.getLogger(__name__)
 EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 
 
-def fetch_ecoli_antibiogram_ids(batch_size: int = 10000) -> list[str]:
-    """Get all BioSample IDs for E. coli with antibiogram data."""
+def fetch_antibiogram_ids(organism: str = "Escherichia coli", batch_size: int = 10000) -> list[str]:
+    """Get all BioSample IDs for a species with antibiogram data."""
+    org_encoded = organism.replace(" ", "+")
     url = (
         f"{EUTILS_BASE}/esearch.fcgi"
         f"?db=biosample"
-        f"&term=Escherichia+coli[Organism]+AND+antibiogram[filter]"
+        f"&term={org_encoded}[Organism]+AND+antibiogram[filter]"
         f"&retmax={batch_size}"
         f"&retmode=json"
     )
@@ -39,7 +40,7 @@ def fetch_ecoli_antibiogram_ids(batch_size: int = 10000) -> list[str]:
 
     total = int(data["esearchresult"]["count"])
     ids = data["esearchresult"]["idlist"]
-    logger.info(f"Found {total} E. coli BioSamples with antibiogram")
+    logger.info(f"Found {total} {organism} BioSamples with antibiogram")
 
     # Fetch remaining if more than batch_size
     while len(ids) < total:
@@ -132,12 +133,14 @@ def _clean_sign(sign: str) -> str:
 
 def download_antibiogram_data(
     output_path: Path,
+    organism: str = "Escherichia coli",
     batch_size: int = 200,
 ) -> pd.DataFrame:
-    """Download all E. coli antibiogram MIC data from NCBI BioSample.
+    """Download antibiogram MIC data from NCBI BioSample for a species.
 
     Args:
         output_path: Where to save the CSV.
+        organism: Species name (e.g., "Escherichia coli", "Salmonella enterica", "Klebsiella pneumoniae").
         batch_size: BioSample IDs per E-utilities request (max ~200 for XML).
 
     Returns:
@@ -147,8 +150,8 @@ def download_antibiogram_data(
         logger.info(f"Antibiogram data already exists: {output_path}")
         return pd.read_csv(output_path)
 
-    logger.info("Fetching E. coli BioSample IDs with antibiogram data...")
-    all_ids = fetch_ecoli_antibiogram_ids()
+    logger.info(f"Fetching {organism} BioSample IDs with antibiogram data...")
+    all_ids = fetch_antibiogram_ids(organism=organism)
     logger.info(f"Total BioSample IDs: {len(all_ids)}")
 
     all_records = []

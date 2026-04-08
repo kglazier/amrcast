@@ -65,6 +65,8 @@ def build_narms_training_data(
             usecols=["biosample_acc", "asm_acc", "bioproject_acc",
                      "AMR_genotypes", "AMR_genotypes_core", "number_amr_genes"],
             low_memory=False,
+            on_bad_lines="skip",
+            quoting=3,  # QUOTE_NONE — NCBI TSVs have unescaped quotes
         )
         joined_df = mic_df.merge(meta_df, on="biosample_acc", how="inner")
 
