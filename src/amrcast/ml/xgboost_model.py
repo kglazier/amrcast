@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import xgboost as xgb
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import KFold, train_test_split
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +18,7 @@ class MICPredictor:
     valid doubling dilution.
     """
 
-    VALID_LOG2_MICS = np.arange(-4, 11, dtype=float)  # 0.0625 to 1024 ug/mL
+    VALID_LOG2_MICS = np.arange(-7, 11, dtype=float)  # 0.008 to 1024 ug/mL
 
     def __init__(self, antibiotic: str):
         self.antibiotic = antibiotic
@@ -84,6 +84,98 @@ class MICPredictor:
         )
 
         return metrics
+
+    def cross_validate(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        feature_names: list[str] | None = None,
+        n_folds: int = 5,
+        random_state: int = 42,
+    ) -> dict:
+        """Run k-fold cross-validation and return aggregated metrics.
+
+        Also trains a final model on all data (stored as self.model).
+
+        Returns:
+            Dict with per-fold and aggregated (mean ± std) metrics.
+        """
+        self.feature_names = feature_names or [f"f{i}" for i in range(X.shape[1])]
+        kf = KFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+
+        fold_metrics = []
+        for fold_i, (train_idx, val_idx) in enumerate(kf.split(X)):
+            X_train, X_val = X[train_idx], X[val_idx]
+            y_train, y_val = y[train_idx], y[val_idx]
+
+            # Hold out 15% of training fold for early stopping
+            X_tr, X_es, y_tr, y_es = train_test_split(
+                X_train, y_train, test_size=0.15, random_state=random_state
+            )
+
+            model = xgb.XGBRegressor(
+                n_estimators=500,
+                max_depth=6,
+                learning_rate=0.1,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                min_child_weight=3,
+                reg_alpha=0.1,
+                reg_lambda=1.0,
+                random_state=random_state,
+                early_stopping_rounds=20,
+                eval_metric="mae",
+            )
+            model.fit(X_tr, y_tr, eval_set=[(X_es, y_es)], verbose=False)
+
+            y_pred = model.predict(X_val)
+            metrics = self._compute_metrics(y_val, y_pred)
+            metrics["n_train"] = len(X_train)
+            metrics["n_val"] = len(X_val)
+            fold_metrics.append(metrics)
+
+            logger.info(
+                f"[{self.antibiotic}] Fold {fold_i+1}/{n_folds}: "
+                f"MAE={metrics['mae']:.2f}, EA={metrics['essential_agreement']:.1%}"
+            )
+
+        # Aggregate
+        agg = {}
+        for key in ["mae", "essential_agreement", "exact_match"]:
+            values = [m[key] for m in fold_metrics]
+            agg[f"{key}_mean"] = float(np.mean(values))
+            agg[f"{key}_std"] = float(np.std(values))
+
+        agg["n_samples"] = len(y)
+        agg["n_folds"] = n_folds
+        agg["fold_metrics"] = fold_metrics
+
+        logger.info(
+            f"[{self.antibiotic}] CV result: "
+            f"MAE={agg['mae_mean']:.2f}±{agg['mae_std']:.2f}, "
+            f"EA={agg['essential_agreement_mean']:.1%}±{agg['essential_agreement_std']:.1%}"
+        )
+
+        # Train final model on all data for deployment
+        X_tr, X_es, y_tr, y_es = train_test_split(
+            X, y, test_size=0.15, random_state=random_state
+        )
+        self.model = xgb.XGBRegressor(
+            n_estimators=500,
+            max_depth=6,
+            learning_rate=0.1,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            min_child_weight=3,
+            reg_alpha=0.1,
+            reg_lambda=1.0,
+            random_state=random_state,
+            early_stopping_rounds=20,
+            eval_metric="mae",
+        )
+        self.model.fit(X_tr, y_tr, eval_set=[(X_es, y_es)], verbose=False)
+
+        return agg
 
     def predict_raw(self, X: np.ndarray) -> np.ndarray:
         """Predict log2(MIC) values (continuous)."""

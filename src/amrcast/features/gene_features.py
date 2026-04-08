@@ -79,6 +79,23 @@ def build_feature_matrix(
         row["n_point_mutations"] = float(len(profile.point_mutations))
         row["n_drug_classes"] = float(len(detected_classes))
 
+        # Per-drug-class mutation counts (critical for quinolone resistance)
+        mutations_by_class: dict[str, int] = {}
+        for h in profile.point_mutations:
+            dc = h.drug_class
+            if dc != "NA":
+                mutations_by_class[dc] = mutations_by_class.get(dc, 0) + 1
+        for dc in drug_classes:
+            row[f"{dc}_n_mutations"] = float(mutations_by_class.get(dc, 0))
+
+        # Per-drug-class gene count (acquired resistance genes, excluding point mutations)
+        genes_by_class: dict[str, int] = {}
+        for h in profile.amr_hits:
+            if h.method not in ("POINTX", "POINTN") and h.drug_class != "NA":
+                genes_by_class[h.drug_class] = genes_by_class.get(h.drug_class, 0) + 1
+        for dc in drug_classes:
+            row[f"{dc}_n_genes"] = float(genes_by_class.get(dc, 0))
+
         rows.append(row)
 
     df = pd.DataFrame(rows).set_index("sample_id")

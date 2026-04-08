@@ -254,8 +254,7 @@ class ESMEmbedder:
         """Embed AMR proteins for a genome and aggregate into fixed-length vector.
 
         Uses mean pooling over all AMR protein embeddings to produce a single
-        genome-level embedding. Future versions could use attention-weighted
-        pooling or a set transformer.
+        genome-level embedding.
 
         Args:
             gene_symbols: List of gene symbols to embed.
@@ -281,3 +280,88 @@ class ESMEmbedder:
         # Mean pool across all AMR protein embeddings
         emb_matrix = np.stack(list(embeddings.values()))
         return emb_matrix.mean(axis=0)
+
+    def embed_genome_by_drug_class(
+        self,
+        hits_by_class: dict[str, list[str]],
+        protein_sequences: dict[str, str],
+        drug_classes: list[str],
+        n_components: int = 32,
+    ) -> dict[str, np.ndarray]:
+        """Embed AMR proteins per drug class, keeping signals separate.
+
+        Instead of mean-pooling ALL proteins into one vector (which drowns out
+        the gyrA signal when averaged with blaTEM), this produces one compressed
+        embedding per drug class. Quinolone target mutations get their own
+        embedding, beta-lactamases get theirs, etc.
+
+        Compression: each 1280-dim embedding is reduced to n_components dims by
+        averaging consecutive chunks. Deterministic, no fitting required.
+
+        Args:
+            hits_by_class: Dict of drug_class -> list of gene symbols in that class.
+            protein_sequences: Dict of gene_symbol -> protein sequence.
+            drug_classes: Fixed list of drug classes (determines output columns).
+            n_components: Compressed embedding size per class.
+
+        Returns:
+            Dict of drug_class -> compressed embedding (n_components,).
+        """
+        # Collect all proteins we need to embed
+        all_proteins = []
+        for dc, symbols in hits_by_class.items():
+            for sym in symbols:
+                if sym in protein_sequences and protein_sequences[sym]:
+                    all_proteins.append((sym, protein_sequences[sym]))
+
+        # Batch embed all proteins at once (efficient GPU usage)
+        if all_proteins:
+            # Deduplicate by symbol
+            seen = set()
+            unique_proteins = []
+            for sym, seq in all_proteins:
+                if sym not in seen:
+                    unique_proteins.append((sym, seq))
+                    seen.add(sym)
+            all_embeddings = self.embed_proteins(unique_proteins)
+        else:
+            all_embeddings = {}
+
+        # Aggregate per drug class
+        result = {}
+        for dc in drug_classes:
+            symbols = hits_by_class.get(dc, [])
+            class_embs = [
+                all_embeddings[sym]
+                for sym in symbols
+                if sym in all_embeddings
+            ]
+
+            if class_embs:
+                mean_emb = np.stack(class_embs).mean(axis=0)
+            else:
+                mean_emb = np.zeros(self.embedding_dim)
+
+            result[dc] = _compress_embedding(mean_emb, n_components)
+
+        return result
+
+
+def _compress_embedding(embedding: np.ndarray, n_components: int) -> np.ndarray:
+    """Compress a high-dim embedding by averaging consecutive chunks.
+
+    E.g., 1280-dim → 32-dim by averaging groups of 40 dimensions each.
+    Deterministic, preserves overall structure, no fitting needed.
+    """
+    dim = len(embedding)
+    if n_components >= dim:
+        return embedding
+
+    chunk_size = dim // n_components
+    compressed = np.zeros(n_components)
+    for i in range(n_components):
+        start = i * chunk_size
+        end = start + chunk_size if i < n_components - 1 else dim
+        compressed[i] = embedding[start:end].mean()
+
+    return compressed

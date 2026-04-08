@@ -118,6 +118,8 @@ def build_combined_features_with_sequences(
     drug_classes: list[str] | None = None,
     esm_model_name: str = "esm2_t33_650M_UR50D",
     esm_cache_dir: Path | None = None,
+    esm_per_class: bool = True,
+    esm_components: int = 32,
 ) -> pd.DataFrame:
     """Build combined features when protein sequences are available.
 
@@ -131,6 +133,9 @@ def build_combined_features_with_sequences(
         drug_classes: Fixed list of drug classes.
         esm_model_name: ESM-2 model name.
         esm_cache_dir: Cache directory for embeddings.
+        esm_per_class: If True, produce per-drug-class embeddings (recommended).
+            If False, use legacy mean-pool across all proteins.
+        esm_components: Compressed embedding size per drug class.
 
     Returns:
         Combined feature DataFrame.
@@ -140,19 +145,48 @@ def build_combined_features_with_sequences(
     # Gene features
     gene_df = build_feature_matrix(profiles, gene_symbols=gene_symbols, drug_classes=drug_classes)
 
+    # Infer drug classes from gene_df if not provided
+    if drug_classes is None:
+        drug_classes = sorted({
+            col.replace("_class", "")
+            for col in gene_df.columns
+            if col.endswith("_class")
+        })
+
     # ESM-2 embeddings
     embedder = ESMEmbedder(model_name=esm_model_name, cache_dir=esm_cache_dir)
 
     esm_rows = []
     for profile in profiles:
         seqs = protein_sequences.get(profile.sample_id, {})
-        symbols = [h.element_symbol for h in profile.amr_hits]
-        genome_emb = embedder.embed_genome_proteins(symbols, seqs)
+        row = {"sample_id": profile.sample_id}
 
-        esm_rows.append({
-            "sample_id": profile.sample_id,
-            **{f"esm_{i}": v for i, v in enumerate(genome_emb)},
-        })
+        if esm_per_class:
+            # Group AMR hits by drug class
+            hits_by_class: dict[str, list[str]] = {}
+            for h in profile.amr_hits:
+                if h.drug_class != "NA":
+                    hits_by_class.setdefault(h.drug_class, []).append(h.element_symbol)
+
+            class_embeddings = embedder.embed_genome_by_drug_class(
+                hits_by_class=hits_by_class,
+                protein_sequences=seqs,
+                drug_classes=drug_classes,
+                n_components=esm_components,
+            )
+
+            for dc, emb in class_embeddings.items():
+                dc_safe = dc.replace("/", "_").replace(" ", "_")
+                for i, v in enumerate(emb):
+                    row[f"esm_{dc_safe}_{i}"] = v
+        else:
+            # Legacy: mean-pool all proteins into one vector
+            symbols = [h.element_symbol for h in profile.amr_hits]
+            genome_emb = embedder.embed_genome_proteins(symbols, seqs)
+            for i, v in enumerate(genome_emb):
+                row[f"esm_{i}"] = v
+
+        esm_rows.append(row)
 
     esm_df = pd.DataFrame(esm_rows).set_index("sample_id")
     combined = pd.concat([gene_df, esm_df], axis=1)

@@ -24,6 +24,8 @@ def run_training_pipeline(
     use_cached_amrfinder: bool = True,
     use_esm: bool = False,
     esm_model_name: str = "esm2_t33_650M_UR50D",
+    use_cv: bool = True,
+    n_folds: int = 5,
 ) -> dict:
     """Run the full training pipeline.
 
@@ -183,7 +185,14 @@ def run_training_pipeline(
 
         logger.info(f"[{antibiotic}] Training with {len(valid_ids)} samples, {X.shape[1]} features...")
         predictor = MICPredictor(antibiotic=antibiotic)
-        metrics = predictor.train(X, y, feature_names=list(feature_df.columns))
+
+        if use_cv and len(valid_ids) >= 20:
+            metrics = predictor.cross_validate(
+                X, y, feature_names=list(feature_df.columns), n_folds=n_folds
+            )
+        else:
+            metrics = predictor.train(X, y, feature_names=list(feature_df.columns))
+
         predictor.save(model_dir)
         all_metrics[antibiotic] = metrics
 

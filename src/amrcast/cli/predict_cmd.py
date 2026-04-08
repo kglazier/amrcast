@@ -110,36 +110,39 @@ def predict(
 
     # Step 3: Predict
     from amrcast.ml.xgboost_model import MICPredictor
+    from amrcast.explain.clinical import classify_mic
 
     predictions = []
+    explanations = []
+
     for ab in target_abs:
         predictor = MICPredictor(antibiotic=ab)
         predictor.load(model_dir)
 
         log2_mic = float(predictor.predict(X)[0])
         mic = float(2 ** log2_mic)
+        clinical_cat = classify_mic(ab, mic)
 
         pred = {
             "antibiotic": ab,
             "predicted_mic_ug_ml": round(mic, 4),
             "predicted_log2_mic": round(log2_mic, 2),
+            "clinical_category": clinical_cat,
         }
 
-        # Optional SHAP explanations
         if explain and predictor.model is not None:
             try:
-                import shap
+                from amrcast.explain.shap_explainer import explain_prediction
 
-                explainer = shap.TreeExplainer(predictor.model)
-                shap_values = explainer.shap_values(X)
-                top_indices = abs(shap_values[0]).argsort()[-5:][::-1]
-                pred["top_features"] = [
-                    {
-                        "feature": feature_columns[i] if i < len(feature_columns) else f"f{i}",
-                        "shap_value": round(float(shap_values[0][i]), 3),
-                    }
-                    for i in top_indices
-                ]
+                explanation = explain_prediction(
+                    model=predictor.model,
+                    X=X,
+                    feature_names=feature_columns,
+                    antibiotic=ab,
+                    predicted_log2_mic=log2_mic,
+                )
+                pred["explanation"] = explanation.to_dict()
+                explanations.append(explanation)
             except Exception as e:
                 pred["explain_error"] = str(e)
 
@@ -164,3 +167,11 @@ def predict(
         typer.echo(f"\nResults written to {output}", err=True)
     else:
         typer.echo(output_json)
+
+    # Print human-readable reports to stderr when explaining
+    if explain and explanations:
+        typer.echo("\n" + "=" * 60, err=True)
+        typer.echo("  PREDICTION REPORT", err=True)
+        typer.echo("=" * 60, err=True)
+        for exp in explanations:
+            typer.echo(exp.detailed_report(), err=True)

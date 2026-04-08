@@ -21,6 +21,8 @@ def train(
     organism: str = typer.Option("Escherichia", help="Organism for AMRFinderPlus."),
     esm: bool = typer.Option(False, "--esm", help="Include ESM-2 protein embeddings (requires GPU)."),
     esm_model: str = typer.Option("esm2_t33_650M_UR50D", help="ESM-2 model name."),
+    cv: bool = typer.Option(True, help="Use k-fold cross-validation (recommended)."),
+    n_folds: int = typer.Option(5, help="Number of CV folds."),
 ) -> None:
     """Train XGBoost MIC prediction models on downloaded data."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -36,6 +38,7 @@ def train(
     typer.echo(f"  Models: {model_dir}")
     typer.echo(f"  Organism: {organism}")
     typer.echo(f"  ESM-2: {'enabled (' + esm_model + ')' if esm else 'disabled'}")
+    typer.echo(f"  Cross-validation: {n_folds}-fold" if cv else "  Cross-validation: off")
     if ab_list:
         typer.echo(f"  Antibiotics: {ab_list}")
 
@@ -48,14 +51,26 @@ def train(
         organism=organism,
         use_esm=esm,
         esm_model_name=esm_model,
+        use_cv=cv,
+        n_folds=n_folds,
     )
 
     typer.echo("\n=== Training Results ===")
     for ab, m in metrics.items():
-        typer.echo(
-            f"  {ab}: MAE={m['mae']:.2f}, "
-            f"EA={m['essential_agreement']:.1%}, "
-            f"n={m['n_train']+m['n_val']}"
-        )
+        if "mae_mean" in m:
+            # CV results
+            typer.echo(
+                f"  {ab} ({m['n_samples']} samples, {m['n_folds']}-fold CV):\n"
+                f"    MAE  = {m['mae_mean']:.2f} ± {m['mae_std']:.2f}\n"
+                f"    EA   = {m['essential_agreement_mean']:.1%} ± {m['essential_agreement_std']:.1%}\n"
+                f"    Exact= {m['exact_match_mean']:.1%} ± {m['exact_match_std']:.1%}"
+            )
+        else:
+            # Single-split results
+            typer.echo(
+                f"  {ab}: MAE={m['mae']:.2f}, "
+                f"EA={m['essential_agreement']:.1%}, "
+                f"n={m['n_train']+m['n_val']}"
+            )
 
     typer.echo(f"\nModels saved to {model_dir}/")

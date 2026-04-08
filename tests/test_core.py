@@ -158,3 +158,25 @@ class TestMICPredictor:
         assert rounded[1] == 2.0
         assert rounded[2] == -1.0
         assert rounded[3] == 10.0
+
+    def test_cross_validate(self):
+        rng = np.random.RandomState(42)
+        n_samples = 60
+        n_features = 10
+        X = rng.rand(n_samples, n_features)
+        y = rng.uniform(-2, 8, n_samples)
+
+        predictor = MICPredictor(antibiotic="test_cv")
+        cv_metrics = predictor.cross_validate(X, y, n_folds=3)
+
+        assert "mae_mean" in cv_metrics
+        assert "mae_std" in cv_metrics
+        assert "essential_agreement_mean" in cv_metrics
+        assert "exact_match_mean" in cv_metrics
+        assert cv_metrics["n_folds"] == 3
+        assert cv_metrics["n_samples"] == n_samples
+        assert len(cv_metrics["fold_metrics"]) == 3
+        # Final model should be trained
+        assert predictor.model is not None
+        preds = predictor.predict(X[:3])
+        assert len(preds) == 3

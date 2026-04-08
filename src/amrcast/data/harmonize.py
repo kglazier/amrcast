@@ -79,4 +79,9 @@ def harmonize_mic_data(df: pd.DataFrame) -> pd.DataFrame:
     # Ensure genome_id is string
     df["genome_id"] = df["genome_id"].astype(str)
 
+    # Flag censored values (> or >= means true MIC could be higher,
+    # < or <= means true MIC could be lower)
+    sign = df.get("measurement_sign", pd.Series(dtype=str))
+    df["censored"] = sign.isin([">", ">=", "<", "<="])
+
     return df
