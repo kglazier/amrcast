@@ -1,5 +1,5 @@
-# Data and models (large files)
-data/
+# Data and models (large files, top-level data dir only)
+/data/
 *.h5
 *.hdf5
 *.fasta
