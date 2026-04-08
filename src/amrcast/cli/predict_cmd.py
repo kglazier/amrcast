@@ -19,17 +19,36 @@ def predict(
         None,
         help="Comma-separated antibiotics. Default: all available models.",
     ),
-    model_dir: Path = typer.Option(None, help="Model directory."),
+    model_dir: Path = typer.Option(None, help="Model directory. Overrides --organism."),
     output: Path = typer.Option(None, "-o", help="Output JSON file."),
     fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json."),
     explain: bool = typer.Option(False, "--explain", help="Include SHAP explanations."),
-    organism: str = typer.Option("Escherichia", help="Organism for AMRFinderPlus."),
+    organism: str = typer.Option(
+        "ecoli",
+        "--organism", "-O",
+        help="Species: ecoli, salmonella, klebsiella. Sets model dir and AMRFinderPlus organism.",
+    ),
 ) -> None:
     """Predict MIC values for a genome assembly."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
+    # Map organism shorthand to model dir and AMRFinderPlus organism name
+    ORGANISM_MAP = {
+        "ecoli": ("data/narms/models", "Escherichia"),
+        "escherichia": ("data/narms/models", "Escherichia"),
+        "salmonella": ("data/salmonella/models", "Salmonella"),
+        "klebsiella": ("data/klebsiella/models", "Klebsiella"),
+    }
+
+    org_key = organism.lower().strip()
+    if org_key in ORGANISM_MAP:
+        default_model_dir, amrfinder_organism = ORGANISM_MAP[org_key]
+    else:
+        default_model_dir = "data/narms/models"
+        amrfinder_organism = organism  # Pass through as AMRFinderPlus organism name
+
     settings = get_settings()
-    model_dir = model_dir or settings.model_dir
+    model_dir = model_dir or Path(default_model_dir)
 
     if not input_file.exists():
         typer.echo(f"Error: Input file not found: {input_file}", err=True)
@@ -75,7 +94,7 @@ def predict(
     # Step 1: Run AMRFinderPlus
     from amrcast.genome.amrfinder import run_amrfinder
 
-    profile = run_amrfinder(input_file, organism=organism)
+    profile = run_amrfinder(input_file, organism=amrfinder_organism)
     typer.echo(
         f"  AMRFinderPlus: {len(profile.amr_hits)} AMR genes, "
         f"{len(profile.point_mutations)} point mutations, "
