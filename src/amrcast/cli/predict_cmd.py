@@ -45,10 +45,16 @@ def predict(
         default_model_dir, amrfinder_organism = ORGANISM_MAP[org_key]
     else:
         default_model_dir = "data/narms/models"
-        amrfinder_organism = organism  # Pass through as AMRFinderPlus organism name
+        amrfinder_organism = organism
 
     settings = get_settings()
     model_dir = model_dir or Path(default_model_dir)
+
+    # Auto-download models if not present
+    if not (model_dir / "feature_columns.json").exists() and org_key in ORGANISM_MAP:
+        from amrcast.models.download import ensure_models
+        typer.echo(f"Downloading {org_key} models...", err=True)
+        model_dir = ensure_models(org_key)
 
     if not input_file.exists():
         typer.echo(f"Error: Input file not found: {input_file}", err=True)
