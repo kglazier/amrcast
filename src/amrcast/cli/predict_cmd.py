@@ -20,7 +20,8 @@ def predict(
         help="Comma-separated antibiotics. Default: all available models.",
     ),
     model_dir: Path = typer.Option(None, help="Model directory."),
-    output: Path = typer.Option(None, "-o", help="Output JSON file. Default: stdout."),
+    output: Path = typer.Option(None, "-o", help="Output JSON file."),
+    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json."),
     explain: bool = typer.Option(False, "--explain", help="Include SHAP explanations."),
     organism: str = typer.Option("Escherichia", help="Organism for AMRFinderPlus."),
 ) -> None:
@@ -143,19 +144,46 @@ def predict(
         "predictions": predictions,
     }
 
-    output_json = json.dumps(result, indent=2)
-
+    # Output
     if output:
         with open(output, "w") as f:
-            f.write(output_json)
-        typer.echo(f"\nResults written to {output}", err=True)
-    else:
-        typer.echo(output_json)
+            json.dump(result, f, indent=2)
+        typer.echo(f"Results written to {output}", err=True)
 
-    # Print human-readable reports to stderr when explaining
+    if fmt == "json":
+        typer.echo(json.dumps(result, indent=2))
+    else:
+        # Table output
+        _print_table(input_file.name, profile, predictions)
+
     if explain and explanations:
-        typer.echo("\n" + "=" * 60, err=True)
-        typer.echo("  PREDICTION REPORT", err=True)
-        typer.echo("=" * 60, err=True)
+        typer.echo("")
         for exp in explanations:
-            typer.echo(exp.detailed_report(), err=True)
+            typer.echo(exp.detailed_report())
+
+
+def _print_table(sample_name: str, profile, predictions: list[dict]) -> None:
+    """Print predictions as a clean table."""
+    typer.echo(f"\n  {sample_name}")
+    typer.echo(f"  {len(profile.amr_hits)} AMR genes, {len(profile.point_mutations)} point mutations\n")
+
+    # Header
+    typer.echo(f"  {'Antibiotic':<28} {'MIC (ug/mL)':>12} {'Category':>14}")
+    typer.echo(f"  {'-' * 28} {'-' * 12} {'-' * 14}")
+
+    for p in predictions:
+        mic = p["predicted_mic_ug_ml"]
+        mic_str = f"{mic:.3f}" if mic < 1 else f"{mic:.1f}"
+        cat = p["clinical_category"]
+
+        # Color-code category
+        if cat == "Resistant":
+            cat_display = f"** {cat} **"
+        elif cat == "Intermediate":
+            cat_display = f"   {cat}   "
+        else:
+            cat_display = f"   {cat}   "
+
+        typer.echo(f"  {p['antibiotic']:<28} {mic_str:>12} {cat_display:>14}")
+
+    typer.echo("")

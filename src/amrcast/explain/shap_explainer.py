@@ -75,7 +75,7 @@ class PredictionExplanation:
         """Human-readable one-line summary."""
         mic_str = f"{self.predicted_mic_ug_ml:.1f}" if self.predicted_mic_ug_ml >= 1 else f"{self.predicted_mic_ug_ml:.3f}"
         return (
-            f"{self.antibiotic}: {mic_str} µg/mL → {self.clinical_category}"
+            f"{self.antibiotic}: {mic_str} ug/mL -> {self.clinical_category}"
         )
 
     def detailed_report(self) -> str:
@@ -85,7 +85,7 @@ class PredictionExplanation:
         if self.breakpoint_info:
             bp = self.breakpoint_info
             lines.append(
-                f"  CLSI breakpoints: S ≤ {bp['susceptible_lte']} | R ≥ {bp['resistant_gte']} {bp['unit']}"
+                f"  CLSI breakpoints: S <= {bp['susceptible_lte']} | R >= {bp['resistant_gte']} ug/mL"
             )
             lines.append("")
 
@@ -98,7 +98,7 @@ class PredictionExplanation:
                     f"    {c.feature_name:<30} ({sign}{c.shap_value:.2f} log2)  [{feat_info}]"
                 )
                 if c.annotation:
-                    lines.append(f"      → {c.annotation}")
+                    lines.append(f"      -> {c.annotation}")
             lines.append("")
 
         return "\n".join(lines)

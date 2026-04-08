@@ -123,13 +123,59 @@ tetracycline: 16.0 ug/mL -> Resistant
       -> Tetracycline resistance; efflux pump or ribosomal protection
 ```
 
-### Train your own models
+### Reproduce the training data
+
+No genome downloads needed. The training pipeline uses NCBI pre-computed AMRFinderPlus results + MIC data from BioSample antibiogram tables.
 
 ```bash
-# Download NARMS data from NCBI (metadata only, ~500 MB)
-# Then train on all antibiotics with 5-fold CV
-amrcast train run --data-dir data/narms --cv --n-folds 5
+mkdir -p data/narms
+
+# Step 1: Download E. coli pathogen detection metadata (~490 MB, has AMRFinderPlus genotypes)
+curl -o data/narms/ecoli_amr_metadata.tsv \
+  "https://ftp.ncbi.nlm.nih.gov/pathogen/Results/Escherichia_coli_Shigella/latest_snps/AMR/PDG000000004.5982.amr.metadata.tsv"
+
+# Step 2: Download MIC data from NCBI BioSample (10,654 E. coli isolates with antibiogram)
+python -c "
+from amrcast.data.ncbi_narms import download_antibiogram_data
+from pathlib import Path
+download_antibiogram_data(Path('data/narms/antibiogram_mic.csv'))
+"
+
+# Step 3: Train all antibiotics with 5-fold CV
+python -c "
+from amrcast.data.narms_features import build_narms_training_data
+from amrcast.ml.xgboost_model import MICPredictor
+from pathlib import Path
+import json
+
+features, targets = build_narms_training_data(
+    mic_path='data/narms/antibiogram_mic.csv',
+    metadata_path='data/narms/ecoli_amr_metadata.tsv',
+    platform_filter='ensitit',
+    min_isolates_per_drug=500,
+)
+
+model_dir = Path('data/narms/models')
+model_dir.mkdir(parents=True, exist_ok=True)
+
+for ab in sorted(targets['antibiotic'].unique()):
+    ab_targets = targets[targets['antibiotic'] == ab]
+    valid_ids = [acc for acc in ab_targets['biosample_acc'] if acc in features.index]
+    if len(valid_ids) < 50:
+        continue
+    X = features.loc[valid_ids].values
+    y = ab_targets.set_index('biosample_acc').loc[valid_ids, 'log2_mic'].values
+    predictor = MICPredictor(antibiotic=ab)
+    cv = predictor.cross_validate(X, y, feature_names=list(features.columns), n_folds=5)
+    predictor.save(model_dir)
+    print(f'{ab:<28} n={cv[\"n_samples\"]:>5}  EA={cv[\"essential_agreement_mean\"]:.1%}')
+
+with open(model_dir / 'feature_columns.json', 'w') as f:
+    json.dump(list(features.columns), f)
+"
 ```
+
+The metadata TSV version number changes daily. Check the [FTP directory](https://ftp.ncbi.nlm.nih.gov/pathogen/Results/Escherichia_coli_Shigella/latest_snps/AMR/) for the current filename.
 
 ## Architecture
 

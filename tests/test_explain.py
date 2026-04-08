@@ -136,7 +136,7 @@ class TestSHAPExplainer:
         # Check report generation
         report = explanation.detailed_report()
         assert "ampicillin" in report
-        assert "µg/mL" in report
+        assert "ug/mL" in report
 
     def test_explanation_with_gene_annotations(self):
         from amrcast.ml.xgboost_model import MICPredictor
