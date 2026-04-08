@@ -1,39 +1,55 @@
 # AMRCast
 
-ML-powered antibiotic resistance prediction with quantitative MIC forecasting from whole genome sequencing data.
+Quantitative antibiotic resistance prediction from whole-genome sequencing. Predicts **MIC values** (not just Resistant/Susceptible) for 28 antibiotics in *E. coli*, with SHAP-based clinical explanations.
 
-## What it does
+## Results
 
-AMRCast takes a bacterial genome assembly and predicts **quantitative MIC values** (minimum inhibitory concentration) — not just binary Resistant/Susceptible. It uses [NCBI AMRFinderPlus](https://github.com/ncbi/amr/wiki) for gene and point mutation detection, then applies machine learning to predict how resistant the organism actually is.
+Trained on 10,654 *E. coli* isolates from NARMS (FDA/CDC/USDA) with standardized Sensititre broth microdilution MIC testing. Evaluated with 5-fold cross-validation.
 
-## Architecture
+| Antibiotic | Samples | Essential Agreement | MAE (log2) |
+|---|---|---|---|
+| Kanamycin | 1,130 | **99.1%** | 0.11 |
+| Tetracycline | 5,923 | **98.1%** | 0.17 |
+| Orbifloxacin | 1,365 | **98.3%** | 0.12 |
+| Nalidixic acid | 4,467 | **98.1%** | 0.40 |
+| Sulfisoxazole | 3,974 | **98.1%** | 0.22 |
+| Ceftriaxone | 3,977 | **97.9%** | 0.18 |
+| Cefoxitin | 4,437 | **97.8%** | 0.43 |
+| Azithromycin | 4,467 | **97.6%** | 0.50 |
+| Chloramphenicol | 6,017 | **97.1%** | 0.50 |
+| Gentamicin | 6,020 | **95.9%** | 0.56 |
+| Meropenem | 3,354 | **94.2%** | 0.17 |
+| Ampicillin | 6,040 | **93.7%** | 0.61 |
+| Ciprofloxacin | 4,526 | **92.9%** | 0.27 |
+| Streptomycin | 3,970 | **91.7%** | 0.58 |
+| Imipenem | 2,044 | **91.1%** | 0.33 |
+
+25 of 28 antibiotics achieve >90% Essential Agreement (within 1 doubling dilution).
+
+## How it works
 
 ```
-Genome FASTA → AMRFinderPlus (gene detection + point mutations)
-             → Feature extraction (gene presence, identity, mutations, drug classes)
-             → XGBoost MIC prediction (log2 scale, per antibiotic)
-             → SHAP explanations
-             → JSON output with predicted MIC values
+Genome FASTA
+  -> AMRFinderPlus (NCBI) detects resistance genes + point mutations
+  -> Feature extraction (gene presence, mutation counts)
+  -> XGBoost predicts MIC per antibiotic (log2 scale)
+  -> SHAP explains which genes drive the prediction
+  -> Clinical report (S/I/R via CLSI breakpoints)
 ```
 
-AMRFinderPlus is an established, NCBI-maintained tool for AMR gene detection. AMRCast builds on top of it — we don't reinvent gene detection, we predict MIC from its output.
+AMRFinderPlus handles gene detection (a solved problem). AMRCast builds the **quantitative prediction and interpretation layer** on top.
 
-## Prerequisites
+## Quick start
 
-### AMRFinderPlus (required)
+### Prerequisites
 
-AMRFinderPlus runs on Linux. On Windows, install via WSL:
+AMRFinderPlus must be installed. On Windows (via WSL):
 
 ```bash
-# Install WSL (admin PowerShell)
 wsl --install
-
-# Inside WSL, install miniconda + AMRFinderPlus
-curl -sSL https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -o miniconda.sh
-bash miniconda.sh -b -p $HOME/miniconda3
-export PATH=$HOME/miniconda3/bin:$PATH
+# In WSL:
 conda install -y -c bioconda -c conda-forge ncbi-amrfinderplus
-amrfinder -u  # download database
+amrfinder -u
 ```
 
 On Linux/Mac:
@@ -42,35 +58,99 @@ conda install -c bioconda -c conda-forge ncbi-amrfinderplus
 amrfinder -u
 ```
 
-## Install
+### Install
 
 ```bash
-pip install -e .          # core
-pip install -e ".[dev]"   # with dev tools
-pip install -e ".[gpu]"   # with ESM-2 support (future)
+pip install -e .
 ```
 
-## Usage
+### Predict
 
 ```bash
-# Download training data (E. coli genomes + MIC values from BV-BRC)
-amrcast data download --n-genomes 100
-
-# Train models
-amrcast train run
-
-# Predict MIC for a new genome
+# Predict MIC for a genome (uses pre-trained NARMS models)
 amrcast predict run genome.fasta
-amrcast predict run genome.fasta --explain  # with SHAP explanations
+
+# With SHAP explanations
+amrcast predict run genome.fasta --explain
+
+# Specific antibiotics
+amrcast predict run genome.fasta --antibiotics ampicillin,ciprofloxacin,gentamicin
 ```
 
-## Current status
+### Example output
 
-- **Species:** E. coli (target: multi-species)
-- **Antibiotics:** Ciprofloxacin, Ampicillin (target: 15+ antibiotics)
-- **Gene detection:** AMRFinderPlus (NCBI) — curated, organism-specific, includes point mutations
-- **ML model:** XGBoost on gene presence/identity + point mutations + drug class features
-- **Planned:** ESM-2 protein language model embeddings for novel variant detection
+```
+amrcast predict run genome.fasta --explain --antibiotics ampicillin,tetracycline
+```
+
+```json
+{
+  "predictions": [
+    {
+      "antibiotic": "ampicillin",
+      "predicted_mic_ug_ml": 16.0,
+      "clinical_category": "Intermediate",
+      "explanation": {
+        "top_features": [
+          {"feature": "blaCMY-2", "shap_value": 0.91, "annotation": "AmpC cephalosporinase"},
+          {"feature": "blaCTX-M-14", "shap_value": 0.82, "annotation": "ESBL; hydrolyzes 3rd-gen cephalosporins"}
+        ],
+        "breakpoint": {"susceptible_lte": 8, "resistant_gte": 32}
+      }
+    },
+    {
+      "antibiotic": "tetracycline",
+      "predicted_mic_ug_ml": 16.0,
+      "clinical_category": "Resistant",
+      "explanation": {
+        "top_features": [
+          {"feature": "tet(A)", "shap_value": 1.67, "annotation": "Tetracycline efflux pump"}
+        ]
+      }
+    }
+  ]
+}
+```
+
+With `--explain`, a human-readable report is also printed:
+
+```
+tetracycline: 16.0 ug/mL -> Resistant
+  CLSI breakpoints: S <= 4 | R >= 16 ug/mL
+
+  Top contributing features:
+    tet(A)_present          (+1.67 log2)  [= 1.0]
+      -> Tetracycline resistance; efflux pump or ribosomal protection
+```
+
+### Train your own models
+
+```bash
+# Download NARMS data from NCBI (metadata only, ~500 MB)
+# Then train on all antibiotics with 5-fold CV
+amrcast train run --data-dir data/narms --cv --n-folds 5
+```
+
+## Architecture
+
+- **Gene detection:** [AMRFinderPlus](https://github.com/ncbi/amr/wiki) (NCBI) — curated, organism-specific, includes point mutations
+- **ML model:** XGBoost on gene/mutation presence features (649 features)
+- **Training data:** NARMS (FDA/CDC/USDA) via NCBI BioSample antibiogram + Pathogen Detection
+- **Explainability:** SHAP TreeExplainer + CLSI M100 breakpoints + gene annotations
+- **Species:** *E. coli* (Enterobacterales)
+
+## Development
+
+```bash
+pip install -e ".[dev]"
+pytest                    # 41 tests
+```
+
+## What this is NOT
+
+- Not a gene detection tool (use AMRFinderPlus)
+- Not a binary R/S classifier (existing tools do this)
+- Not for TB (CRyPTIC consortium has this covered)
 
 ## License
 
