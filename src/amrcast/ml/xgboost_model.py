@@ -93,6 +93,8 @@ class MICPredictor:
         n_folds: int = 5,
         random_state: int = 42,
         groups: np.ndarray | None = None,
+        y_lower: np.ndarray | None = None,
+        y_upper: np.ndarray | None = None,
     ) -> dict:
         """Run k-fold cross-validation and return aggregated metrics.
 
@@ -103,11 +105,16 @@ class MICPredictor:
                 uses GroupKFold so all samples in the same group stay in
                 the same fold. Use this for phylogenetic/clonal grouping
                 to prevent data leakage from related genomes.
+            y_lower: Lower bound of MIC interval (log2). -inf for left-censored.
+                When provided along with y_upper, uses XGBoost AFT objective
+                for proper censored interval regression.
+            y_upper: Upper bound of MIC interval (log2). +inf for right-censored.
 
         Returns:
             Dict with per-fold and aggregated (mean ± std) metrics.
         """
         self.feature_names = feature_names or [f"f{i}" for i in range(X.shape[1])]
+        use_aft = y_lower is not None and y_upper is not None
 
         if groups is not None:
             n_unique_groups = len(set(groups))
@@ -124,27 +131,36 @@ class MICPredictor:
             X_train, X_val = X[train_idx], X[val_idx]
             y_train, y_val = y[train_idx], y[val_idx]
 
-            # Hold out 15% of training fold for early stopping
-            X_tr, X_es, y_tr, y_es = train_test_split(
-                X_train, y_train, test_size=0.15, random_state=random_state
-            )
+            if use_aft:
+                model = self._train_aft_fold(
+                    X_train, y_lower[train_idx], y_upper[train_idx],
+                    random_state=random_state,
+                )
+            else:
+                # Hold out 15% of training fold for early stopping
+                X_tr, X_es, y_tr, y_es = train_test_split(
+                    X_train, y_train, test_size=0.15, random_state=random_state
+                )
+                model = xgb.XGBRegressor(
+                    n_estimators=500,
+                    max_depth=6,
+                    learning_rate=0.1,
+                    subsample=0.8,
+                    colsample_bytree=0.8,
+                    min_child_weight=3,
+                    reg_alpha=0.1,
+                    reg_lambda=1.0,
+                    random_state=random_state,
+                    early_stopping_rounds=20,
+                    eval_metric="mae",
+                )
+                model.fit(X_tr, y_tr, eval_set=[(X_es, y_es)], verbose=False)
 
-            model = xgb.XGBRegressor(
-                n_estimators=500,
-                max_depth=6,
-                learning_rate=0.1,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                min_child_weight=3,
-                reg_alpha=0.1,
-                reg_lambda=1.0,
-                random_state=random_state,
-                early_stopping_rounds=20,
-                eval_metric="mae",
-            )
-            model.fit(X_tr, y_tr, eval_set=[(X_es, y_es)], verbose=False)
+            if use_aft:
+                y_pred = model.predict(xgb.DMatrix(X_val)) - self.AFT_SHIFT
+            else:
+                y_pred = model.predict(X_val)
 
-            y_pred = model.predict(X_val)
             metrics = self._compute_metrics(y_val, y_pred)
             metrics["n_train"] = len(X_train)
             metrics["n_val"] = len(X_val)
@@ -165,6 +181,7 @@ class MICPredictor:
         agg["n_samples"] = len(y)
         agg["n_folds"] = actual_folds
         agg["grouped"] = groups is not None
+        agg["aft"] = use_aft
         agg["fold_metrics"] = fold_metrics
 
         logger.info(
@@ -174,30 +191,83 @@ class MICPredictor:
         )
 
         # Train final model on all data for deployment
-        X_tr, X_es, y_tr, y_es = train_test_split(
-            X, y, test_size=0.15, random_state=random_state
-        )
-        self.model = xgb.XGBRegressor(
-            n_estimators=500,
-            max_depth=6,
-            learning_rate=0.1,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            min_child_weight=3,
-            reg_alpha=0.1,
-            reg_lambda=1.0,
-            random_state=random_state,
-            early_stopping_rounds=20,
-            eval_metric="mae",
-        )
-        self.model.fit(X_tr, y_tr, eval_set=[(X_es, y_es)], verbose=False)
+        if use_aft:
+            self.model = self._train_aft_fold(X, y_lower, y_upper, random_state=random_state)
+        else:
+            X_tr, X_es, y_tr, y_es = train_test_split(
+                X, y, test_size=0.15, random_state=random_state
+            )
+            self.model = xgb.XGBRegressor(
+                n_estimators=500,
+                max_depth=6,
+                learning_rate=0.1,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                min_child_weight=3,
+                reg_alpha=0.1,
+                reg_lambda=1.0,
+                random_state=random_state,
+                early_stopping_rounds=20,
+                eval_metric="mae",
+            )
+            self.model.fit(X_tr, y_tr, eval_set=[(X_es, y_es)], verbose=False)
 
         return agg
+
+    # AFT requires positive labels. We shift log2(MIC) by this constant
+    # so all values are positive, then shift predictions back.
+    AFT_SHIFT = 10.0  # log2(MIC) range is ~ -7 to +10, shifted to 3 to 20
+
+    def _train_aft_fold(
+        self,
+        X: np.ndarray,
+        y_lower: np.ndarray,
+        y_upper: np.ndarray,
+        random_state: int = 42,
+    ) -> xgb.Booster:
+        """Train one AFT model for interval-censored MIC data.
+
+        XGBoost AFT requires positive labels (it internally computes ln(Y)).
+        We shift all log2(MIC) values by AFT_SHIFT to make them positive,
+        then shift predictions back.
+
+        Returns a Booster (not XGBRegressor) since AFT uses the DMatrix API.
+        """
+        # Shift to positive space
+        lo = np.where(np.isfinite(y_lower), y_lower + self.AFT_SHIFT, y_lower)
+        hi = np.where(np.isfinite(y_upper), y_upper + self.AFT_SHIFT, y_upper)
+
+        # Clamp finite lower bounds to be > 0 (required for AFT)
+        lo = np.where(np.isfinite(lo), np.maximum(lo, 0.01), lo)
+
+        dtrain = xgb.DMatrix(X)
+        dtrain.set_float_info("label_lower_bound", lo)
+        dtrain.set_float_info("label_upper_bound", hi)
+
+        params = {
+            "objective": "survival:aft",
+            "aft_loss_distribution": "normal",
+            "aft_loss_distribution_scale": 1.0,
+            "max_depth": 6,
+            "learning_rate": 0.1,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "min_child_weight": 3,
+            "reg_alpha": 0.1,
+            "reg_lambda": 1.0,
+            "seed": random_state,
+        }
+
+        model = xgb.train(params, dtrain, num_boost_round=500, verbose_eval=False)
+        return model
 
     def predict_raw(self, X: np.ndarray) -> np.ndarray:
         """Predict log2(MIC) values (continuous)."""
         if self.model is None:
             raise RuntimeError("Model not trained. Call train() first.")
+        if isinstance(self.model, xgb.Booster):
+            # AFT predictions are in shifted positive space — shift back
+            return self.model.predict(xgb.DMatrix(X)) - self.AFT_SHIFT
         return self.model.predict(X)
 
     def predict(self, X: np.ndarray) -> np.ndarray:
@@ -241,7 +311,10 @@ class MICPredictor:
 
         model_dir.mkdir(parents=True, exist_ok=True)
         model_path = model_dir / f"xgb_{self.antibiotic}.json"
-        self.model.get_booster().save_model(str(model_path))
+        if isinstance(self.model, xgb.Booster):
+            self.model.save_model(str(model_path))
+        else:
+            self.model.get_booster().save_model(str(model_path))
 
         meta = {
             "antibiotic": self.antibiotic,

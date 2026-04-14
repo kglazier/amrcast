@@ -15,6 +15,7 @@ def train_species(
     min_isolates: int = 500,
     n_folds: int = 5,
     use_groups: bool = True,
+    use_aft: bool = False,
 ) -> dict:
     """Train all antibiotic models for a species from NCBI data.
 
@@ -65,16 +66,24 @@ def train_species(
             continue
 
         X = features.loc[valid_ids].values
-        y = ab_targets.set_index("biosample_acc").loc[valid_ids, "log2_mic"].values
+        ab_indexed = ab_targets.set_index("biosample_acc").loc[valid_ids]
+        y = ab_indexed["log2_mic"].values
 
         groups = None
         if use_groups:
             groups = np.array([isolate_groups[acc] for acc in valid_ids])
 
+        y_lower = None
+        y_upper = None
+        if use_aft:
+            y_lower = ab_indexed["log2_mic_lower"].values
+            y_upper = ab_indexed["log2_mic_upper"].values
+
         predictor = MICPredictor(antibiotic=ab)
         cv = predictor.cross_validate(
             X, y, feature_names=list(features.columns),
             n_folds=n_folds, groups=groups,
+            y_lower=y_lower, y_upper=y_upper,
         )
         predictor.save(model_dir)
 

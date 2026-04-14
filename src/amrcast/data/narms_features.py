@@ -109,6 +109,27 @@ def build_narms_training_data(
         .reset_index()
     )
 
+    # Build interval labels for censored MIC handling (XGBoost AFT)
+    # <= or < means left-censored: true MIC is somewhere in (-inf, observed]
+    # >= or > means right-censored: true MIC is somewhere in [observed, +inf)
+    # == means exact: true MIC is [observed, observed]
+    def _mic_interval(row):
+        sign = str(row["measurement_sign"]).strip()
+        log2 = row["log2_mic"]
+        if sign in ("<=", "<"):
+            return -np.inf, log2
+        elif sign in (">=", ">"):
+            return log2, np.inf
+        else:
+            return log2, log2
+
+    intervals = target_df.apply(_mic_interval, axis=1, result_type="expand")
+    target_df["log2_mic_lower"] = intervals[0]
+    target_df["log2_mic_upper"] = intervals[1]
+
+    n_censored = ((target_df["log2_mic_lower"] == -np.inf) | (target_df["log2_mic_upper"] == np.inf)).sum()
+    logger.info(f"Censored MIC values: {n_censored}/{len(target_df)} ({n_censored/len(target_df):.0%})")
+
     # Build feature matrix from AMR_genotypes
     # Get unique genotypes per isolate
     isolate_genotypes = (
