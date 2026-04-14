@@ -131,16 +131,24 @@ class MICPredictor:
             X_train, X_val = X[train_idx], X[val_idx]
             y_train, y_val = y[train_idx], y[val_idx]
 
+            # Hold out 15% of training fold for early stopping
+            X_tr, X_es, y_tr, y_es = train_test_split(
+                X_train, y_train, test_size=0.15, random_state=random_state
+            )
+
             if use_aft:
-                model = self._train_aft_fold(
-                    X_train, y_lower[train_idx], y_upper[train_idx],
+                lo_tr, lo_es = y_lower[train_idx], y_lower[val_idx]
+                hi_tr, hi_es = y_upper[train_idx], y_upper[val_idx]
+                # Split interval bounds matching the early-stop split
+                lo_tr_tr, lo_tr_es, hi_tr_tr, hi_tr_es = train_test_split(
+                    lo_tr, hi_tr, test_size=0.15, random_state=random_state
+                )
+                model = self._train_interval_fold(
+                    X_tr, lo_tr_tr, hi_tr_tr,
+                    X_val=X_es, y_val=y_es,
                     random_state=random_state,
                 )
             else:
-                # Hold out 15% of training fold for early stopping
-                X_tr, X_es, y_tr, y_es = train_test_split(
-                    X_train, y_train, test_size=0.15, random_state=random_state
-                )
                 model = xgb.XGBRegressor(
                     n_estimators=500,
                     max_depth=6,
@@ -157,7 +165,7 @@ class MICPredictor:
                 model.fit(X_tr, y_tr, eval_set=[(X_es, y_es)], verbose=False)
 
             if use_aft:
-                y_pred = model.predict(xgb.DMatrix(X_val)) - self.AFT_SHIFT
+                y_pred = model.predict(xgb.DMatrix(X_val))
             else:
                 y_pred = model.predict(X_val)
 
@@ -192,7 +200,16 @@ class MICPredictor:
 
         # Train final model on all data for deployment
         if use_aft:
-            self.model = self._train_aft_fold(X, y_lower, y_upper, random_state=random_state)
+            X_tr, X_es, y_tr, y_es = train_test_split(
+                X, y, test_size=0.15, random_state=random_state
+            )
+            lo_tr, lo_es, hi_tr, hi_es = train_test_split(
+                y_lower, y_upper, test_size=0.15, random_state=random_state
+            )
+            self.model = self._train_interval_fold(
+                X_tr, lo_tr, hi_tr, X_val=X_es, y_val=y_es,
+                random_state=random_state,
+            )
         else:
             X_tr, X_es, y_tr, y_es = train_test_split(
                 X, y, test_size=0.15, random_state=random_state
@@ -214,40 +231,63 @@ class MICPredictor:
 
         return agg
 
-    # AFT requires positive labels. We shift log2(MIC) by this constant
-    # so all values are positive, then shift predictions back.
-    AFT_SHIFT = 10.0  # log2(MIC) range is ~ -7 to +10, shifted to 3 to 20
+    def _make_interval_objective(self, y_lower: np.ndarray, y_upper: np.ndarray):
+        """Create a custom XGBoost objective for interval-censored regression.
 
-    def _train_aft_fold(
+        Loss is 0 when prediction falls inside [lower, upper].
+        Outside the interval, loss is squared distance to nearest bound.
+
+        This properly handles censored MIC data:
+          - Exact (==):   [4.0, 4.0]   — standard squared loss
+          - Left (<=/< ): [-inf, -6.0] — no penalty for predicting lower
+          - Right (>=/>): [5.0, +inf]   — no penalty for predicting higher
+        """
+        lo = y_lower.copy()
+        hi = y_upper.copy()
+
+        def interval_obj(predt: np.ndarray, dtrain: xgb.DMatrix) -> tuple:
+            n = len(predt)
+            grad = np.zeros(n)
+            hess = np.ones(n)  # constant hessian for stability
+
+            # Below lower bound: gradient pushes prediction up
+            below = predt < lo
+            grad[below] = predt[below] - lo[below]
+
+            # Above upper bound: gradient pushes prediction down
+            above = predt > hi
+            grad[above] = predt[above] - hi[above]
+
+            # Inside interval: zero gradient (no loss)
+            return grad, hess
+
+        return interval_obj
+
+    def _train_interval_fold(
         self,
         X: np.ndarray,
         y_lower: np.ndarray,
         y_upper: np.ndarray,
+        X_val: np.ndarray | None = None,
+        y_val: np.ndarray | None = None,
         random_state: int = 42,
     ) -> xgb.Booster:
-        """Train one AFT model for interval-censored MIC data.
+        """Train one model with interval-censored custom objective.
 
-        XGBoost AFT requires positive labels (it internally computes ln(Y)).
-        We shift all log2(MIC) values by AFT_SHIFT to make them positive,
-        then shift predictions back.
-
-        Returns a Booster (not XGBRegressor) since AFT uses the DMatrix API.
+        Returns a Booster trained with the interval loss.
         """
-        # Shift to positive space
-        lo = np.where(np.isfinite(y_lower), y_lower + self.AFT_SHIFT, y_lower)
-        hi = np.where(np.isfinite(y_upper), y_upper + self.AFT_SHIFT, y_upper)
-
-        # Clamp finite lower bounds to be > 0 (required for AFT)
-        lo = np.where(np.isfinite(lo), np.maximum(lo, 0.01), lo)
-
         dtrain = xgb.DMatrix(X)
-        dtrain.set_float_info("label_lower_bound", lo)
-        dtrain.set_float_info("label_upper_bound", hi)
+        # Use midpoint of interval as label (needed for eval metric)
+        y_mid = np.where(
+            np.isfinite(y_lower) & np.isfinite(y_upper),
+            (y_lower + y_upper) / 2,
+            np.where(np.isfinite(y_lower), y_lower, y_upper),
+        )
+        dtrain.set_label(y_mid)
+
+        obj = self._make_interval_objective(y_lower, y_upper)
 
         params = {
-            "objective": "survival:aft",
-            "aft_loss_distribution": "normal",
-            "aft_loss_distribution_scale": 1.0,
             "max_depth": 6,
             "learning_rate": 0.1,
             "subsample": 0.8,
@@ -258,7 +298,16 @@ class MICPredictor:
             "seed": random_state,
         }
 
-        model = xgb.train(params, dtrain, num_boost_round=500, verbose_eval=False)
+        evals = []
+        if X_val is not None and y_val is not None:
+            dval = xgb.DMatrix(X_val, label=y_val)
+            evals = [(dval, "val")]
+
+        model = xgb.train(
+            params, dtrain, num_boost_round=500, obj=obj,
+            evals=evals, verbose_eval=False,
+            early_stopping_rounds=20 if evals else None,
+        )
         return model
 
     def predict_raw(self, X: np.ndarray) -> np.ndarray:
