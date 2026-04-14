@@ -4,7 +4,7 @@ import json
 import logging
 from pathlib import Path
 
-import typer
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -14,12 +14,16 @@ def train_species(
     platform_filter: str = "ensitit",
     min_isolates: int = 500,
     n_folds: int = 5,
+    use_groups: bool = True,
 ) -> dict:
     """Train all antibiotic models for a species from NCBI data.
 
-    Expects data_dir to contain:
-      - antibiogram_mic.csv (from download_antibiogram_data)
-      - amr_metadata.tsv (from NCBI FTP)
+    Args:
+        data_dir: Directory containing antibiogram_mic.csv and amr_metadata.tsv.
+        platform_filter: Filter MIC data by testing platform (e.g., "ensitit").
+        min_isolates: Skip antibiotics with fewer isolates.
+        n_folds: Number of CV folds.
+        use_groups: If True, use genotype-grouped CV to prevent clonal leakage.
 
     Returns dict of antibiotic -> CV metrics.
     """
@@ -27,14 +31,21 @@ def train_species(
     from amrcast.ml.xgboost_model import MICPredictor
 
     mic_path = data_dir / "antibiogram_mic.csv"
+
+    # Support both naming conventions
     metadata_path = data_dir / "amr_metadata.tsv"
+    if not metadata_path.exists():
+        # Try species-specific naming (e.g., ecoli_amr_metadata.tsv)
+        tsv_files = list(data_dir.glob("*amr_metadata.tsv"))
+        if tsv_files:
+            metadata_path = tsv_files[0]
 
     if not mic_path.exists():
         raise FileNotFoundError(f"MIC data not found: {mic_path}")
     if not metadata_path.exists():
-        raise FileNotFoundError(f"Metadata not found: {metadata_path}")
+        raise FileNotFoundError(f"Metadata not found in: {data_dir}")
 
-    features, targets = build_narms_training_data(
+    features, targets, isolate_groups = build_narms_training_data(
         mic_path=str(mic_path),
         metadata_path=str(metadata_path),
         platform_filter=platform_filter,
@@ -56,9 +67,14 @@ def train_species(
         X = features.loc[valid_ids].values
         y = ab_targets.set_index("biosample_acc").loc[valid_ids, "log2_mic"].values
 
+        groups = None
+        if use_groups:
+            groups = np.array([isolate_groups[acc] for acc in valid_ids])
+
         predictor = MICPredictor(antibiotic=ab)
         cv = predictor.cross_validate(
-            X, y, feature_names=list(features.columns), n_folds=n_folds
+            X, y, feature_names=list(features.columns),
+            n_folds=n_folds, groups=groups,
         )
         predictor.save(model_dir)
 
@@ -67,6 +83,7 @@ def train_species(
             "mae_mean": cv["mae_mean"],
             "ea_mean": cv["essential_agreement_mean"],
             "exact_mean": cv["exact_match_mean"],
+            "grouped": cv.get("grouped", False),
         }
 
     # Save feature columns

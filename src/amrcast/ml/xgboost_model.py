@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import xgboost as xgb
-from sklearn.model_selection import KFold, train_test_split
+from sklearn.model_selection import GroupKFold, KFold, train_test_split
 
 logger = logging.getLogger(__name__)
 
@@ -92,19 +92,35 @@ class MICPredictor:
         feature_names: list[str] | None = None,
         n_folds: int = 5,
         random_state: int = 42,
+        groups: np.ndarray | None = None,
     ) -> dict:
         """Run k-fold cross-validation and return aggregated metrics.
 
         Also trains a final model on all data (stored as self.model).
 
+        Args:
+            groups: Optional group labels for each sample. When provided,
+                uses GroupKFold so all samples in the same group stay in
+                the same fold. Use this for phylogenetic/clonal grouping
+                to prevent data leakage from related genomes.
+
         Returns:
             Dict with per-fold and aggregated (mean ± std) metrics.
         """
         self.feature_names = feature_names or [f"f{i}" for i in range(X.shape[1])]
-        kf = KFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+
+        if groups is not None:
+            n_unique_groups = len(set(groups))
+            actual_folds = min(n_folds, n_unique_groups)
+            kf = GroupKFold(n_splits=actual_folds)
+            split_iter = kf.split(X, y, groups)
+        else:
+            actual_folds = n_folds
+            kf = KFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+            split_iter = kf.split(X)
 
         fold_metrics = []
-        for fold_i, (train_idx, val_idx) in enumerate(kf.split(X)):
+        for fold_i, (train_idx, val_idx) in enumerate(split_iter):
             X_train, X_val = X[train_idx], X[val_idx]
             y_train, y_val = y[train_idx], y[val_idx]
 
@@ -147,7 +163,8 @@ class MICPredictor:
             agg[f"{key}_std"] = float(np.std(values))
 
         agg["n_samples"] = len(y)
-        agg["n_folds"] = n_folds
+        agg["n_folds"] = actual_folds
+        agg["grouped"] = groups is not None
         agg["fold_metrics"] = fold_metrics
 
         logger.info(

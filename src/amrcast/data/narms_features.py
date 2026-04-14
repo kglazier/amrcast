@@ -158,8 +158,21 @@ def build_narms_training_data(
 
     feature_df = pd.DataFrame(rows).set_index("biosample_acc")
 
-    logger.info(f"Feature matrix: {feature_df.shape}")
-    return feature_df, target_df
+    # Build genotype group labels for grouped CV (prevents clonal leakage)
+    # Isolates with identical genotype profiles get the same group ID
+    genotype_to_group: dict[str, int] = {}
+    isolate_groups: dict[str, int] = {}
+    for acc in feature_df.index:
+        gstr = str(isolate_genotypes.get(acc, ""))
+        if gstr not in genotype_to_group:
+            genotype_to_group[gstr] = len(genotype_to_group)
+        isolate_groups[acc] = genotype_to_group[gstr]
+
+    logger.info(
+        f"Feature matrix: {feature_df.shape}, "
+        f"{len(genotype_to_group)} unique genotype groups"
+    )
+    return feature_df, target_df, isolate_groups
 
 
 def build_features_from_amrfinder(
