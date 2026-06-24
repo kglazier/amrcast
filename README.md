@@ -2,6 +2,8 @@
 
 Quantitative antibiotic resistance prediction from whole-genome sequencing. Predicts **MIC values** (not just Resistant/Susceptible) for multiple antibiotics across three bacterial species, with SHAP-based clinical explanations.
 
+> 📖 **Why I built this** — the motivation, the design decisions, and what I learned: [STORY.md](STORY.md)
+
 ## Results
 
 Trained on NARMS (FDA/CDC/USDA) isolates with standardized Sensititre broth microdilution MIC testing. Evaluated with 5-fold cross-validation.
