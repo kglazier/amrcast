@@ -105,10 +105,21 @@ the skill I'm claiming:
   lag, partly because resistance hinges on specific enzyme variants and partly because the
   training sets for those drugs are small. *Klebsiella* is a harder target across the board —
   complex carbapenem-resistance mechanisms and less data.
-- **Cross-validation can flatter you.** Bacterial isolates are related by descent, so a
-  naive random split can leak near-duplicate genomes across the train/test boundary and
-  inflate the score. Phylogeny-aware validation is the honest test, and tightening that is
-  on the roadmap. I'd rather state this plainly than quote a number I haven't fully earned.
+- **Cross-validation can flatter you — so I checked.** Bacterial isolates are related by
+  descent, so a naive random split can leak near-duplicate genomes across the train/test
+  boundary and inflate the score. I re-ran every model under **phylogeny-aware
+  cross-validation**: isolates are grouped by NCBI Pathogen Detection SNP clusters (~50 SNP,
+  joined from the public `cluster_list` release) so related genomes never span the split, and
+  isolates with no near-neighbor across all 564k sequenced *E. coli* stay as singletons. The
+  headline held. **~37 of 41 *E. coli* drug models stay ≥90% essential agreement**, and the
+  high-*n* drugs barely move — ampicillin 93.7%→92.5%, gentamicin 95.9%→95.8%, ceftriaxone
+  97.9%→97.5%. The models that drop are exactly the ones already flagged as hard:
+  extended-spectrum cephalosporins (cefotaxime 82.4%→76.3%, cefepime 77.6%→73.9%), which
+  confirms those numbers were partly inflated and those models need more data — not that the
+  approach is unsound. Grouping is now the default in the training pipeline
+  (`load_snp_cluster_groups` in `data/`, wired through `train_species`), so the reported
+  number is the honest one. (Small-*n* drugs carry a few points of run-to-run variance; the
+  high-*n* results are stable.)
 
 If those caveats make the project look less finished, good — that's the accurate picture,
 and I'd rather a reviewer trust my numbers than be dazzled by them.

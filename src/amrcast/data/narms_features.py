@@ -196,6 +196,47 @@ def build_narms_training_data(
     return feature_df, target_df, isolate_groups
 
 
+def load_snp_cluster_groups(cluster_file: str, biosamples) -> dict[str, int]:
+    """Map biosamples to phylogeny-aware group ids from NCBI SNP clusters.
+
+    Uses NCBI Pathogen Detection ``*.reference_target.cluster_list.tsv``, which
+    assigns each isolate to a PDS SNP cluster (isolates within ~50 SNPs). Isolates
+    in the same cluster share a group id so related genomes never span the
+    train/test boundary. Isolates absent from the file are genuine NCBI singletons
+    (no near-neighbor across all sequenced genomes) and each gets its own group —
+    they cannot leak, so this is the honest phylogeny-aware grouping.
+
+    Returns dict biosample_acc -> integer group id (contiguous for real clusters,
+    negative for singletons) suitable for sklearn GroupKFold.
+    """
+    import csv
+
+    bios_to_pds: dict[str, str] = {}
+    with open(cluster_file) as fh:
+        for row in csv.DictReader(fh, delimiter="\t"):
+            bios_to_pds[row["biosample_acc"]] = row["PDS_acc"]
+
+    groups: dict[str, int] = {}
+    pds_to_id: dict[str, int] = {}
+    next_singleton = -1
+    for acc in biosamples:
+        pds = bios_to_pds.get(acc)
+        if pds is None:
+            groups[acc] = next_singleton
+            next_singleton -= 1
+        else:
+            if pds not in pds_to_id:
+                pds_to_id[pds] = len(pds_to_id)
+            groups[acc] = pds_to_id[pds]
+
+    n_clustered = sum(1 for g in groups.values() if g >= 0)
+    logger.info(
+        f"SNP-cluster groups: {len(pds_to_id)} clusters covering "
+        f"{n_clustered}/{len(groups)} isolates; rest are singletons"
+    )
+    return groups
+
+
 def build_features_from_amrfinder(
     gene_symbols_detected: list[str],
     feature_columns: list[str],

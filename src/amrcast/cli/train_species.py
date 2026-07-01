@@ -24,11 +24,17 @@ def train_species(
         platform_filter: Filter MIC data by testing platform (e.g., "ensitit").
         min_isolates: Skip antibiotics with fewer isolates.
         n_folds: Number of CV folds.
-        use_groups: If True, use genotype-grouped CV to prevent clonal leakage.
+        use_groups: If True, use grouped CV to prevent leakage from related
+            genomes. Prefers phylogeny-aware grouping (NCBI PDS SNP clusters)
+            when a cluster_list.tsv is present under ``data_dir/clusters/``,
+            otherwise falls back to genotype-profile grouping.
 
     Returns dict of antibiotic -> CV metrics.
     """
-    from amrcast.data.narms_features import build_narms_training_data
+    from amrcast.data.narms_features import (
+        build_narms_training_data,
+        load_snp_cluster_groups,
+    )
     from amrcast.ml.xgboost_model import MICPredictor
 
     mic_path = data_dir / "antibiogram_mic.csv"
@@ -53,6 +59,21 @@ def train_species(
         min_isolates_per_drug=min_isolates,
     )
 
+    # Prefer phylogeny-aware CV groups (NCBI SNP clusters) over genotype grouping.
+    grouping = "none"
+    group_map = None
+    if use_groups:
+        cluster_dir = data_dir / "clusters"
+        cluster_files = sorted(cluster_dir.glob("*cluster_list.tsv")) if cluster_dir.exists() else []
+        if cluster_files:
+            group_map = load_snp_cluster_groups(str(cluster_files[0]), list(features.index))
+            grouping = "phylo_snp_cluster"
+            logger.info(f"Phylogeny-aware CV using SNP clusters from {cluster_files[0].name}")
+        else:
+            group_map = isolate_groups
+            grouping = "genotype"
+            logger.info("No SNP cluster_list.tsv found; falling back to genotype-grouped CV")
+
     model_dir = data_dir / "models"
     model_dir.mkdir(parents=True, exist_ok=True)
 
@@ -70,8 +91,8 @@ def train_species(
         y = ab_indexed["log2_mic"].values
 
         groups = None
-        if use_groups:
-            groups = np.array([isolate_groups[acc] for acc in valid_ids])
+        if group_map is not None:
+            groups = np.array([group_map[acc] for acc in valid_ids])
 
         y_lower = None
         y_upper = None
@@ -93,6 +114,7 @@ def train_species(
             "ea_mean": cv["essential_agreement_mean"],
             "exact_mean": cv["exact_match_mean"],
             "grouped": cv.get("grouped", False),
+            "grouping": grouping,
         }
 
     # Save feature columns
